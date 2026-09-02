@@ -285,12 +285,45 @@
 
 ### 方式 A：Dev 模式（二次开发推荐）
 
+**首次启动**（约 2–3 分钟，下载 Python + Node 依赖）：
+
 ```bash
-cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
+cp .env.example .env       # 按需填 TICKFLOW_API_KEY（留空 = None 模式）
 ./dev.sh                   # Windows: .\dev.ps1
 ```
 
-自动检查 / 下载依赖、释放端口、同时起前后端。后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>。
+**之后每次启动**（秒开，依赖已就绪）：
+
+```bash
+./dev.sh                   # Windows: .\dev.ps1
+```
+  你每次启动服务敲什么
+
+  就一行：
+
+  cd /Users/sampson/Documents/mycode/tickflow-stock-panel
+  ./dev.sh
+
+  dev.sh 已经做好所有事（杀占用端口、装依赖、起前后端、日志加前缀、Ctrl-C 一起关）。要停就 Ctrl-C。
+
+  万一 venv 坏了 / 换了电脑 / 新 clone 项目
+
+  跑这一条把 venv 重建回 arm64：
+
+  cd /Users/sampson/Documents/mycode/tickflow-stock-panel/backend
+  uv venv --python /Users/sampson/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 --clear
+  uv sync --frozen
+
+  然后回根目录 ./dev.sh。
+
+`dev.sh` 会自动检查依赖、释放端口、同时起前后端。后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>。停服务按 `Ctrl-C`，前后端一起关。
+
+> 🍎 **Apple Silicon（M1/M2/M3/M4/M5）用户**：`backend/.python-version` 已 pin 到
+> `cpython-3.12-macos-aarch64-none`，强制 uv 使用 arm64 native CPython。
+> 没有这个 pin 的话，`uv sync` 可能经 pyenv/conda shim 解析到这台 Mac 上的 x86_64 Python，
+> 然后 arm64 原生的 Polars 在第一次 IO 直接把 uvicorn worker 干成 zombie —— 现象就是
+> 前端一直停在「加载中…logo」，`curl /health` 30 秒 0 字节。
+> 别删 `backend/.python-version`，别把它改成 `3.12`（版本号太宽，会被 x86_64 shim 截胡）。
 
 ### 方式 B：预构建镜像（最快，无需编译）
 
