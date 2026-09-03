@@ -45,6 +45,7 @@ import {
   MessageCircle,
   LayoutGrid,
   BookOpenCheck,
+  LineChart,
   ChevronRight,
   ChevronDown,
   Sun,
@@ -98,6 +99,7 @@ const nav = [
   { to: '/tools/jiucai', label: '韭菜公社', icon: MessageCircle },
   { to: '/tools/yuntu', label: '大盘云图', icon: LayoutGrid },
   { to: '/tools/wencai', label: '问财', icon: Sparkles },
+  { to: '/tools/etf-watch', label: 'ETF 观察', icon: LineChart },
 ] as const
 
 /** 亮/暗主题切换 — 状态存 localStorage, 生效见 lib/theme.ts */
