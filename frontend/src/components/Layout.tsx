@@ -42,6 +42,8 @@ import {
   Landmark,
   RadioTower,
   CheckCircle2,
+  MessageCircle,
+  LayoutGrid,
   BookOpenCheck,
   ChevronRight,
   ChevronDown,
@@ -93,6 +95,9 @@ const nav = [
   { to: '/review',      label: '复盘',   icon: BookOpenCheck },
   { to: '/indices', label: '指数', icon: BarChart3 },
   { to: '/data',       label: '数据',   icon: Database },
+  { to: '/tools/jiucai', label: '韭菜公社', icon: MessageCircle },
+  { to: '/tools/yuntu', label: '大盘云图', icon: LayoutGrid },
+  { to: '/tools/wencai', label: '问财', icon: Sparkles },
 ] as const
 
 /** 亮/暗主题切换 — 状态存 localStorage, 生效见 lib/theme.ts */
@@ -744,6 +749,8 @@ export function Layout() {
               </div>
             )
           })}
+          <div className="my-2 border-t border-border/40" aria-hidden />
+          <div className="px-3 pb-1 text-[10px] uppercase tracking-wider text-muted">工具</div>
           <ExtensionSlot
             name="layout.navigation.extra"
             context={{ collapsed: navCollapsed, pathname: location.pathname }}

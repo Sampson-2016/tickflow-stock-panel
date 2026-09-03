@@ -60,6 +60,28 @@ def daily_dirname(asset_type: str, market: str = "cn") -> str:
     return f"kline_daily_{market}"
 
 
+def _split_by_market(df: pl.DataFrame) -> dict[str, pl.DataFrame]:
+    """按 symbol 后缀把 df 拆成 cn/hk/us 子集。
+
+    suffix 解析委托给 app.markets.market_of (单一事实源), 不在此处重复硬编码
+    suffix→market 映射; unknown 走 market_of 的兜底 (数字开头→cn, 字母开头→us)。
+
+    用于 append_daily/append_enriched/flush_live_daily 的统一兜底:
+    即使调用方漏传 market 或传错 market, 数据也会按 suffix 自动写到正确的目录。
+    """
+    # 局部导入: app.markets 是被广泛引用的轻量元数据注册表, repository.py 体量大,
+    # 保持函数内导入避免模块加载顺序敏感 (与 codebase 既有惯例一致)。
+    from app.markets import MARKET_CN, market_of
+
+    if df.is_empty() or "symbol" not in df.columns:
+        return {MARKET_CN: df}
+    market_col = df["symbol"].map_elements(market_of, return_dtype=pl.Utf8)
+    out: dict[str, pl.DataFrame] = {}
+    for sub in df.with_columns(_market=market_col).partition_by("_market"):
+        out[sub["_market"][0]] = sub.drop("_market")
+    return out
+
+
 def _last_available_rows(df: pl.DataFrame, cutoff: date) -> pl.DataFrame:
     """从已按 symbol/date 排序的数据中取每只标的最后一条有效状态。"""
     if df.is_empty():
@@ -2099,20 +2121,36 @@ class KlineRepository:
     # 写入 (Pipeline / Sync)
     # ================================================================
 
-    def append_daily(self, df: pl.DataFrame, market: str = "cn") -> None:
-        """按日分区写入日K数据 (merge-upsert)。港美股按 market 路由到独立目录。"""
+    def append_daily(self, df: pl.DataFrame, market: str = "auto") -> None:
+        """按日分区写入日K数据 (merge-upsert)。
+
+        market="auto" (默认) 时按 symbol 后缀自动路由:
+          .SH/.SZ/.BJ → kline_daily/, .HK → kline_daily_hk/, .US → kline_daily_us/
+        显式传 cn/hk/us 时维持旧行为, 写到对应单一目录。
+        """
         if df.is_empty():
             return
-        self._write_daily_partition(df, daily_dirname("stock", market))
+        if market == "auto":
+            for mkt, sub in _split_by_market(df).items():
+                self._write_daily_partition(sub, daily_dirname("stock", mkt))
+        else:
+            self._write_daily_partition(df, daily_dirname("stock", market))
 
-    def append_enriched(self, df: pl.DataFrame, market: str = "cn") -> None:
-        """按日分区写入 enriched 数据 (merge-upsert)。磁盘仅写入 14 列存储列。"""
+    def append_enriched(self, df: pl.DataFrame, market: str = "auto") -> None:
+        """按日分区写入 enriched 数据 (merge-upsert)。磁盘仅写入 14 列存储列。
+
+        market="auto" 时按 symbol 后缀自动路由。
+        """
         if df.is_empty():
             return
         from app.indicators.pipeline import ENRICHED_STORAGE_COLS
         storage_cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
         df_storage = df.select(storage_cols)
-        self._write_daily_partition(df_storage, enriched_dirname("stock", market))
+        if market == "auto":
+            for mkt, sub in _split_by_market(df_storage).items():
+                self._write_daily_partition(sub, enriched_dirname("stock", mkt))
+        else:
+            self._write_daily_partition(df_storage, enriched_dirname("stock", market))
 
     def append_index_daily(self, df: pl.DataFrame) -> None:
         """按日分区写入指数日K数据 (merge-upsert)。"""
@@ -2403,7 +2441,10 @@ class KlineRepository:
             self._index_enriched_cache_date = dt
 
     def flush_live_daily(self, df: pl.DataFrame) -> None:
-        """覆写当天 kline_daily 分区 (实时行情落盘, 非merge)。"""
+        """覆写当天 kline_daily 分区 (实时行情落盘, 非merge)。
+
+        按 symbol 后缀自动路由 (cn/hk/us) 到对应目录, 避免港美股串到 CN。
+        """
         if df.is_empty() or "date" not in df.columns:
             return
         self.flush_live_daily_asset("stock", df)
@@ -2412,8 +2453,19 @@ class KlineRepository:
         """覆写当天指定资产日K分区 (实时行情落盘, 非merge)。"""
         if df.is_empty() or "date" not in df.columns:
             return
+        if asset_type == "stock":
+            # 实时行情可能同时含 cn/hk/us; 按 suffix 自动分流到对应目录
+            parts = _split_by_market(df)
+            with self._write_lock:
+                for mkt, sub in parts.items():
+                    base = self.store.data_dir / daily_dirname("stock", mkt)
+                    dt = sub["date"][0]
+                    ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
+                    out = base / f"date={ds}" / "part.parquet"
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    self._atomic_write_parquet(sub.sort(["symbol", "date"]), out)
+            return
         table = {
-            "stock": "kline_daily",
             "index": "kline_index_daily",
             "etf": "kline_etf_daily",
         }.get(asset_type)

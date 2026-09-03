@@ -35,6 +35,9 @@ const Indices = lazy(() => import('./pages/Indices').then(m => ({ default: m.Ind
 const Regime = lazy(() => import('./pages/Regime').then(m => ({ default: m.Regime })))
 const AbnormalMoves = lazy(() => import('./pages/AbnormalMoves').then(m => ({ default: m.AbnormalMoves })))
 const Dev = lazy(() => import('./pages/Dev').then(m => ({ default: m.Dev })))
+const Jiucai = lazy(() => import('./pages/tools/Jiucai').then(m => ({ default: m.Jiucai })))
+const Yuntu = lazy(() => import('./pages/tools/Yuntu').then(m => ({ default: m.Yuntu })))
+const Wencai = lazy(() => import('./pages/tools/Wencai').then(m => ({ default: m.Wencai })))
 
 const CORE_ROUTE_PATHS = new Set([
   '/',
@@ -61,6 +64,9 @@ const CORE_ROUTE_PATHS = new Set([
   '/branding',
   '/settings',
   '/dev',
+  '/tools/jiucai',
+  '/tools/yuntu',
+  '/tools/wencai',
   '/settings/keys',
   '/settings/ai',
   '/settings/queries',
@@ -135,6 +141,10 @@ export const router = createBrowserRouter([
       { path: 'settings', element: <Settings /> },
       // 隐藏路由：开发者工具（不暴露在菜单，仅供调试）
       { path: 'dev', element: <Dev /> },
+      // 内嵌常用股票工具站点
+      { path: 'tools/jiucai', element: <Jiucai /> },
+      { path: 'tools/yuntu', element: <Yuntu /> },
+      { path: 'tools/wencai', element: <Wencai /> },
       // 旧路由兼容重定向
       { path: 'settings/keys', element: <Navigate to="/settings?tab=data-sources" replace /> },
       { path: 'settings/ai', element: <Navigate to="/settings?tab=ai" replace /> },
