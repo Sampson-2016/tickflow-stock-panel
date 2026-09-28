@@ -39,6 +39,7 @@ const Jiucai = lazy(() => import('./pages/tools/Jiucai').then(m => ({ default: m
 const Yuntu = lazy(() => import('./pages/tools/Yuntu').then(m => ({ default: m.Yuntu })))
 const Wencai = lazy(() => import('./pages/tools/Wencai').then(m => ({ default: m.Wencai })))
 const EtfWatch = lazy(() => import('./pages/tools/EtfWatch').then(m => ({ default: m.EtfWatch })))
+const FearGreed = lazy(() => import('./pages/tools/FearGreed').then(m => ({ default: m.FearGreed })))
 
 const CORE_ROUTE_PATHS = new Set([
   '/',
@@ -69,6 +70,7 @@ const CORE_ROUTE_PATHS = new Set([
   '/tools/yuntu',
   '/tools/wencai',
   '/tools/etf-watch',
+  '/tools/fear-greed',
   '/settings/keys',
   '/settings/ai',
   '/settings/queries',
@@ -148,6 +150,7 @@ export const router = createBrowserRouter([
       { path: 'tools/yuntu', element: <Yuntu /> },
       { path: 'tools/wencai', element: <Wencai /> },
       { path: 'tools/etf-watch', element: <EtfWatch /> },
+      { path: 'tools/fear-greed', element: <FearGreed /> },
       // 旧路由兼容重定向
       { path: 'settings/keys', element: <Navigate to="/settings?tab=data-sources" replace /> },
       { path: 'settings/ai', element: <Navigate to="/settings?tab=ai" replace /> },
