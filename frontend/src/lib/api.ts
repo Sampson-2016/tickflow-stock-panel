@@ -3079,6 +3079,122 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ strategy_id: strategyId, code, name: meta?.name ?? '', description: meta?.description ?? '' }),
     }),
+
+  // ===== EasyQuotation 持仓 T 操作信号 (二开模块, L2 扩展) =====
+  tSignalStatus: () =>
+    request<{
+      running: boolean
+      interval_sec: number
+      last_fetch_ms: number
+      last_fetch_error: string
+      signals_today: number
+      position_count: number
+      enabled_position_count: number
+      auto_push_to_feishu: boolean
+      easyquotation_installed: boolean
+      feishu_webhook_configured: boolean
+    }>('/api/custom/t-signal/status'),
+  tSignalStart: () =>
+    request<{ ok: boolean; already_running?: boolean; interval_sec?: number }>(
+      '/api/custom/t-signal/start',
+      { method: 'POST' },
+    ),
+  tSignalStop: () =>
+    request<{ ok: boolean; already_stopped?: boolean }>('/api/custom/t-signal/stop', {
+      method: 'POST',
+    }),
+  tSignalGetConfig: () =>
+    request<{
+      interval_sec: number
+      price_change_pct_threshold: number
+      volume_ratio_threshold: number
+      big_order_imbalance_threshold: number
+      cooldown_seconds: number
+      trading_hours_only: boolean
+      auto_push_to_feishu: boolean
+    }>('/api/custom/t-signal/config'),
+  tSignalPutConfig: (patch: Record<string, unknown>) =>
+    request<Record<string, unknown>>('/api/custom/t-signal/config', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+  tSignalRecent: (limit = 50, symbol?: string) => {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (symbol) params.set('symbol', symbol)
+    return request<{
+      items: Array<{
+        kind: 'price_change' | 'volume_surge' | 'big_order_imbalance'
+        symbol: string
+        name: string
+        ts_ms: number
+        price: number
+        prev_close: number
+        change_pct: number
+        detail: string
+        severity: 'high' | 'medium'
+      }>
+      count: number
+    }>(`/api/custom/t-signal/recent?${params.toString()}`)
+  },
+  tSignalListPositions: () =>
+    request<{
+      items: Array<{
+        symbol: string
+        name: string
+        enabled: boolean
+        added_at: string
+        data_status: 'ok' | 'failed' | 'never'
+        last_success_ms: number
+      }>
+      count: number
+    }>('/api/custom/t-signal/positions'),
+  tSignalAddPosition: (symbol: string, name?: string) =>
+    request<{
+      symbol: string
+      name: string
+      enabled: boolean
+      added_at: string
+      data_status: 'ok' | 'failed' | 'never'
+      last_success_ms: number
+    }>(
+      '/api/custom/t-signal/positions',
+      { method: 'POST', body: JSON.stringify({ symbol, name: name ?? '' }) },
+    ),
+  tSignalRemovePosition: (symbol: string) =>
+    request<{ ok: boolean; symbol: string }>(`/api/custom/t-signal/positions/${symbol}`, {
+      method: 'DELETE',
+    }),
+  tSignalSetPositionEnabled: (symbol: string, enabled: boolean) =>
+    request<{
+      symbol: string
+      name: string
+      enabled: boolean
+      added_at: string
+      data_status: 'ok' | 'failed' | 'never'
+      last_success_ms: number
+    }>(`/api/custom/t-signal/positions/${symbol}`, {
+      method: 'PUT', body: JSON.stringify({ enabled }),
+    }),
+  tSignalIntraday: (symbol: string) =>
+    request<{ symbol: string; bars: Array<{ ts_ms: number; price: number; volume: number | null }>; count: number }>(
+      `/api/custom/t-signal/positions/${symbol}/intraday`,
+    ),
+  tSignalPositionSignals: (symbol: string, limit = 100) =>
+    request<{
+      symbol: string
+      items: Array<{
+        kind: 'price_change' | 'volume_surge' | 'big_order_imbalance'
+        symbol: string
+        name: string
+        ts_ms: number
+        price: number
+        prev_close: number
+        change_pct: number
+        detail: string
+        severity: 'high' | 'medium'
+      }>
+      count: number
+    }>(`/api/custom/t-signal/positions/${symbol}/signals?limit=${limit}`),
 }
 
 // ===== Pipeline =====

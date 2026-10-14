@@ -304,6 +304,9 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY（留空 = None 模式�
   cd /Users/sampson/Documents/mycode/tickflow-stock-panel
   ./dev.sh
 
+(如果是腾讯云： 
+npm i -g pnpm && source $HOME/.local/bin/env && bash ./dev.sh
+)
   dev.sh 已经做好所有事（杀占用端口、装依赖、起前后端、日志加前缀、Ctrl-C 一起关）。要停就 Ctrl-C。
 
   万一 venv 坏了 / 换了电脑 / 新 clone 项目
@@ -324,6 +327,9 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY（留空 = None 模式�
 > 然后 arm64 原生的 Polars 在第一次 IO 直接把 uvicorn worker 干成 zombie —— 现象就是
 > 前端一直停在「加载中…logo」，`curl /health` 30 秒 0 字节。
 > 别删 `backend/.python-version`，别把它改成 `3.12`（版本号太宽，会被 x86_64 shim 截胡）。
+
+
+
 
 ### 方式 B：预构建镜像（最快，无需编译）
 
