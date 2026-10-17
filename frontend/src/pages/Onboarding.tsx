@@ -28,6 +28,7 @@ import { useCapabilities, usePreferences, useSettings } from '@/lib/useSharedQue
 import { QK } from '@/lib/queryKeys'
 import { CAP_LABELS } from '@/lib/capability-labels'
 import { Logo } from '@/components/Logo'
+import { BRAND_NAME } from '@/lib/brand'
 import { DataSourceEditor } from '@/pages/settings/DataSourceEditor'
 
 // ===== 引导页:5 步向导 =====
@@ -106,7 +107,7 @@ export function Onboarding() {
             className="shrink-0"
             style={{ color: BRAND, filter: `drop-shadow(0 0 8px ${BRAND}55)` }}
           />
-          <span className="text-sm font-semibold tracking-tight">Tick Stock Panel</span>
+          <span className="text-sm font-semibold tracking-tight">{BRAND_NAME}</span>
         </div>
         {/* 步骤进度条 —— 胶囊式 */}
         <div className="flex items-center gap-1.5">
@@ -226,7 +227,7 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
       </motion.div>
 
       <h1 className="mt-6 text-3xl font-bold text-foreground tracking-tight">
-        欢迎使用 TSP
+        欢迎使用 {BRAND_NAME}
       </h1>
       <p className="mt-3 text-sm text-secondary leading-relaxed max-w-md mx-auto">
         一个本地化的 A 股量化分析面板 —— 行情、选股、回测、监控、财务一体化。

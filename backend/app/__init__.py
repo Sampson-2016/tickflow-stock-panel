@@ -1,4 +1,4 @@
-"""Tick Stock Panel backend."""
+"""观心台 backend."""
 
 import sys
 

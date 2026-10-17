@@ -306,6 +306,21 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY（留空 = None 模式�
 
 (如果是腾讯云： 
 npm i -g pnpm && source $HOME/.local/bin/env && bash ./dev.sh
+开启：
+sudo -i
+cd mycode/tickflow-stock-panel/
+tmux new -s dev
+bash ./dev.sh
+# 按 Ctrl+B 然后按 D 断开会话
+# 下次登录后执行 tmux attach -t dev 重新接入
+
+或者直接： 
+tmux kill-session -t dev
+tmux new -s dev -d 'cd /root/mycode/tickflow-stock-panel && bash ./dev.sh 2>&1 | tee /root/mycode/tickflow-stock-panel/dev.log'
+tail -n 100 /root/mycode/tickflow-stock-panel/dev.log
+
+
+关闭：pkill -f dev.sh
 )
   dev.sh 已经做好所有事（杀占用端口、装依赖、起前后端、日志加前缀、Ctrl-C 一起关）。要停就 Ctrl-C。
 

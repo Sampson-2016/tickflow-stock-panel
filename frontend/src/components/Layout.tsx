@@ -57,6 +57,7 @@ import {
   PanelLeftOpen,
 } from 'lucide-react'
 import { Logo } from './Logo'
+import { BRAND_NAME } from '@/lib/brand'
 import { api, type IndexQuote } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
@@ -584,7 +585,7 @@ export function Layout() {
                 className="font-bold text-[11px] uppercase tracking-[0.14em] text-foreground whitespace-nowrap"
                 style={{ textShadow: `0 0 10px ${BRAND}44` }}
               >
-                Tick Stock Panel
+                {BRAND_NAME}
               </div>
             )}
             {/* 收起/展开 按钮 */}

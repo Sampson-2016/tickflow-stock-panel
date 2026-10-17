@@ -87,17 +87,16 @@ if not getattr(sys, "frozen", False):
 @asynccontextmanager
 async def _application_lifespan(app: FastAPI):
     logger.info(
-        "Tick Stock Panel v%s starting (mode=%s)",
+        "观心台 v%s starting (mode=%s)",
         __version__, tf_client.current_mode(),
     )
 
-    # 首次启动: 若配置了 AUTH_PASSWORD 环境变量且未设过密码, 用它初始化。
-    # 公网部署免 SSH 端口转发; 已设过密码则不覆盖 (改密码走 UI)。
-    try:
-        from app.services import auth as auth_service
-        auth_service.bootstrap_from_env()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("auth bootstrap failed: %s", e)
+    # 凭证引导: ensure_default_credentials 处理 username (默认 admin, 可被 .env 的
+    # AUTH_USERNAME 覆盖); bootstrap_from_env 处理密码 (必须从 .env 读, 无默认值)。
+    # 关键: 抛 RuntimeError 时不吞, 让后端启动失败, 避免"无密码空跑"的危险状态。
+    from app.services import auth as auth_service
+    auth_service.ensure_default_credentials()
+    auth_service.bootstrap_from_env()
 
     # 数据层
     store = DataStore()
@@ -372,7 +371,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Tick Stock Panel",
+    title="观心台",
     version=__version__,
     description="A 股选股 + 回测面板 — TickFlow 适配",
     lifespan=lifespan,

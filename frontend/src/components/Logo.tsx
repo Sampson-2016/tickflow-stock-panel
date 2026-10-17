@@ -6,6 +6,8 @@
 //   - body 偏上 + 下影长:bullish 站稳感 (上影短 / 下影长)
 //
 // 用 currentColor,继承父级 color 设定,方便切换品牌色。
+import { BRAND_NAME } from '@/lib/brand'
+
 interface LogoProps {
   className?: string
   size?: number
@@ -22,7 +24,7 @@ export function Logo({ className, size = 32, style }: LogoProps) {
       className={className}
       style={style}
       role="img"
-      aria-label="Tick Stock Panel"
+      aria-label={BRAND_NAME}
     >
       {/* 左方括号 */}
       <path
