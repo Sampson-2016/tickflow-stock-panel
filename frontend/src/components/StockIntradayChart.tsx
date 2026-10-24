@@ -17,6 +17,88 @@ interface Props {
   priceLines?: { value: number; label?: string; color?: string }[]
   /** 自动刷新间隔(ms)。undefined/0 = 不轮询(默认)。个股对话框盘中实时刷新时传入。 */
   refetchIntervalMs?: number
+  /**
+   * 当数据源未提供该日分钟数据时，生成 mock 分钟数据填充 UI 用于预览。
+   * 仅用于 UI 验证场景；真实使用不应开启。
+   */
+  allowMockFallback?: boolean
+  /** mock 模式标记，用于在 UI 上提示"当前为模拟数据" */
+  showMockBadge?: boolean
+}
+
+/**
+ * 生成 mock 分钟K数据，覆盖完整交易日 9:30-11:30/13:00-15:00。
+ * 基于前收做平缓随机游走，volume/amount 给出合理量级。
+ */
+function generateMockMinuteRows(
+  prevClose: number,
+  date: string,
+  seed: number,
+): MinuteKlineRow[] {
+  // 简易 mulberry32 PRNG，保证同种子可复现
+  let s = seed >>> 0
+  const rand = () => {
+    s |= 0
+    s = (s + 0x6D2B79F5) | 0
+    let t = Math.imul(s ^ (s >>> 15), 1 | s)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+
+  const rows: MinuteKlineRow[] = []
+  // 与 FULL_DAY_TIMES 一致：9:30-11:30 + 13:00-15:00 共 240 个分钟点
+  const times: string[] = []
+  for (let h = 9, m = 30; h * 60 + m <= 11 * 60 + 30; m++) {
+    if (m === 60) { h++; m = 0 }
+    times.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`)
+  }
+  for (let h = 13, m = 0; h * 60 + m <= 15 * 60; m++) {
+    if (m === 60) { h++; m = 0 }
+    times.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`)
+  }
+
+  let price = prevClose
+    // 单步变动上限为价格的 0.3%
+    const stepMax = prevClose * 0.003
+    // 总波动目标 ±2% 以内
+    for (let i = 0; i < times.length; i++) {
+      const t = times[i]
+      // 开盘前 5 分钟波动更大
+      const volatility = i < 5 ? 1.5 : 1.0
+      const delta = (rand() - 0.5) * 2 * stepMax * volatility
+      let newPrice = price + delta
+      // 全日波动限制在 ±2%
+      if (newPrice > prevClose * 1.02) newPrice = prevClose * 1.02
+      if (newPrice < prevClose * 0.98) newPrice = prevClose * 0.98
+      price = newPrice
+
+      const open = i === 0 ? prevClose : rows[i - 1].close
+      const close = price
+      const high = Math.max(open, close) + Math.abs(delta) * 0.5
+      const low = Math.min(open, close) - Math.abs(delta) * 0.5
+      // 基础成交量 + 随机扰动；开盘/收盘附近略放量
+      const baseVol = 5000 + rand() * 15000
+      const hourMin = i < 5 || i > times.length - 10 ? 2.0 : 1.0
+      const volume = Math.floor(baseVol * hourMin)
+      const amount = Math.floor(volume * 100 * close)
+
+      // datetime 用 UTC 时间（北京时间 - 8h），EChartsIntraday 的 formatMinuteTime
+      // 会做 +8 时区转换，这样最终映射回北京时间的 HH:mm 与 FULL_DAY_TIMES 对齐。
+      const [bh, bm] = t.split(':').map(Number)
+      const utcH = (bh - 8 + 24) % 24
+      const utcHH = String(utcH).padStart(2, '0')
+      const utcMM = String(bm).padStart(2, '0')
+      rows.push({
+        datetime: `${date}T${utcHH}:${utcMM}:00Z`,
+        open: Number(open.toFixed(2)),
+        high: Number(high.toFixed(2)),
+        low: Number(low.toFixed(2)),
+        close: Number(close.toFixed(2)),
+        volume,
+        amount,
+      })
+    }
+  return rows
 }
 
 export function StockIntradayChart({
@@ -30,6 +112,8 @@ export function StockIntradayChart({
   currentPrice,
   priceLines,
   refetchIntervalMs,
+  allowMockFallback = false,
+  showMockBadge = false,
 }: Props) {
   const qc = useQueryClient()
   const [minuteDismissed, setMinuteDismissed] = useState(false)
@@ -57,12 +141,58 @@ export function StockIntradayChart({
   // 指数分钟K无本地存储且不支持落库获取 (后端 sync_minute_single 显式拒绝), 不显示获取按钮
   const isIndex = minute.data?.asset_type === 'index'
 
+  // mock 兜底：数据源未提供时用模拟数据填充 UI
+  const mockRows = useMemo<MinuteKlineRow[]>(() => {
+    if (!allowMockFallback) return []
+    if (!date) return []
+    // 关键：等 minute 查询完成（成功或失败都行），避免在加载中触发
+    if (minute.isLoading || minute.isPending) return []
+    if (minuteRows.length > 0) return []
+    // 优先用后端返回的 prev_close；退而求其次用 prop 传入的 prevClose
+    const base = minute.data?.prev_close ?? prevClose
+    if (!base || base <= 0) return []
+    // 用 symbol+date 字符串生成稳定种子
+    const seed = (symbol + date).split('').reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 0)
+    const rows = generateMockMinuteRows(base, date, seed)
+    // eslint-disable-next-line no-console
+    console.log('[StockIntradayChart] mock fallback triggered', {
+      symbol, date, base, rowCount: rows.length, minuteStatus: minute.status,
+    })
+    return rows
+  }, [allowMockFallback, date, minute.isLoading, minute.isPending, minuteRows.length, symbol, minute.data?.prev_close, prevClose, minute.status])
+
+  const showMock = mockRows.length > 0
+
   useEffect(() => {
     setMinuteDismissed(false)
     onPriceHover?.(null)
   }, [date, onPriceHover])
 
   if (!symbol || !date) return null
+
+  // mock 兜底渲染：直接走 EChartsIntraday，UI 完全一致
+  if (showMock) {
+    return (
+      <div className={className} style={{ height, flexShrink: 0 }}>
+        {showMockBadge && (
+          <div className="mb-1 inline-flex items-center gap-1 rounded bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+            模拟数据（UI 预览）
+          </div>
+        )}
+        <EChartsIntraday
+          data={mockRows}
+          height={showMockBadge ? height - 22 : height}
+          prevClose={prevClose}
+          date={date}
+          onPriceHover={onPriceHover}
+          onPriceDoubleClick={onPriceDoubleClick}
+          currentPrice={currentPrice}
+          priceLines={priceLines}
+        />
+      </div>
+    )
+  }
 
   return (
     <div className={className} style={{ height, flexShrink: 0 }}>

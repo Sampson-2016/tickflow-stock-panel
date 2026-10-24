@@ -189,6 +189,8 @@ export function StockPanel({
               currentPrice={rows[rows.length - 1]?.close}
               priceLines={priceLines}
               refetchIntervalMs={refetchIntervalMs}
+              allowMockFallback
+              showMockBadge
             />
           </div>
         )}
