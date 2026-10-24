@@ -1052,6 +1052,83 @@ class TSignalPoller:
         if accepted and cfg["auto_push_to_feishu"]:
             self._pusher.push(accepted)
 
+    # ── 统一行情模块接入 ───────────────────────────────────────
+    # 当 free_realtime 模块的 position_t 开关开启时，由统一调度器驱动评估，
+    # 不再使用内部 _tick 自轮询路径（避免重复拉取与节奏冲突）。
+    def on_realtime_df(self, df) -> None:
+        """从统一行情调度器接收标准化 DataFrame 并评估三件套信号。
+
+        与 _tick 共用评估/落盘/推送逻辑，仅替换数据源 (调度器→本模块)。
+        线程：由调度器后台线程调用，无需另起线程。
+        """
+        if df is None or df.is_empty():
+            return
+        cfg = load_config()
+        # 与 _tick 不同：trading_hours_only 由统一调度器负责，此处不再二次过滤
+        # 仅校验：统一行情模块下 position_t 全局开关必须开启
+        try:
+            from app.services.free_realtime import config as fr_config
+
+            if not fr_config.get_module_enabled("position_t"):
+                return
+        except Exception:
+            return
+
+        # 转换：标准化 DataFrame → {symbol: raw_dict}（与 _tick 输入格式一致）
+        # 同时只处理本模块持仓 T 列表中的标的
+        enabled_symbols = set(self._positions.list_enabled_symbols())
+        if not enabled_symbols:
+            return
+        quotes: dict[str, dict[str, Any]] = {}
+        for row in df.iter_rows(named=True):
+            sym = str(row.get("symbol") or "")
+            if sym not in enabled_symbols:
+                continue
+            quotes[sym] = {
+                "now": row.get("last_price"),
+                "open": row.get("open"),
+                "high": row.get("high"),
+                "low": row.get("low"),
+                "volume": row.get("volume"),
+                "amount": row.get("amount"),
+                # 大单买卖盘（三件套原依赖 easyquotation 字段）
+                "bid1_price": row.get("bid1_price"),
+                "ask1_price": row.get("ask1_price"),
+                "bid1_volume": row.get("bid1_volume"),
+                "ask1_volume": row.get("ask1_volume"),
+            }
+        if not quotes:
+            return
+        now_ms = int(time.time() * 1000)
+        self._positions.mark_tick_result(
+            requested=enabled_symbols,
+            succeeded=set(quotes.keys()),
+            ts_ms=now_ms,
+        )
+        # 日内 K 攒点（与 _tick 同模式：同分钟覆盖）
+        for sym, raw in quotes.items():
+            now_price = self._evaluator._safe_float(raw.get("now"))
+            volume = self._evaluator._safe_float(raw.get("volume"))
+            if now_price is not None:
+                self._intraday.append(sym, now_ms, now_price, volume)
+
+        signals = self._evaluator.evaluate(quotes, cfg, now_ms)
+        cooldown = int(cfg["cooldown_seconds"])
+        accepted: list[TSignal] = []
+        for s in signals:
+            if self._cooldown.allow(s.symbol, s.kind, cooldown):
+                accepted.append(s)
+                self._store.append(s)
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._signals_today_date != today:
+            self._signals_today_date = today
+            self._signals_today = 0
+        self._signals_today += len(accepted)
+
+        if accepted and cfg["auto_push_to_feishu"]:
+            self._pusher.push(accepted)
+
 
 # ── 模块单例 ─────────────────────────────────────────────────────
 POLLER = TSignalPoller()
@@ -1192,11 +1269,34 @@ def setup(registrar: BackendExtensionRegistrar) -> None:
 
 
 def startup(context: ExtensionContext) -> None:
-    """可选启动钩子: 如果有 enabled 的持仓 T 标的, 自动启动 poller。
+    """可选启动钩子: 接入免费实时行情统一调度器。
 
-    服务重启后用户无需手动 /start: 加过 enabled 的持仓 T 标的会自动开始评估。
+    决策树（与用户最新确认一致）:
+      - free_realtime 模块 + position_t 子开关均开启
+        → 注册 collector / callback 到统一调度器，自身不再起轮询线程
+      - 否则若 easyquotation 已装且有 enabled 标的
+        → 退回旧路径自轮询（兼容用户未启用统一行情模块的场景）
     """
     del context  # 未使用, 仅签名要求
+    try:
+        from app.services.free_realtime import config as fr_config
+        from app.services.free_realtime import scheduler as fr_scheduler
+
+        if fr_config.get_global_enabled() and fr_config.get_module_enabled("position_t"):
+            # 注册 symbol 采集器（仅返回 enabled 的持仓 T 标的）
+            fr_scheduler.FreeRealtimeScheduler.register_module_callback(
+                POLLER.on_realtime_df
+            )
+            scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
+            scheduler.register_collector(
+                lambda: list(POLLER.positions().list_enabled_symbols())
+            )
+            logger.info("t_signal attached to free_realtime scheduler")
+            return
+    except Exception as e:
+        logger.warning("t_signal attach to free_realtime failed: %s", e)
+
+    # 退回旧路径: 仍依赖 easyquotation 自轮询
     if not HAS_EASYQUOTATION:
         return  # 缺 easyquotation 时安静跳过, 用户 /status 端点可见详情
     if not POLLER.positions().list_enabled_symbols():

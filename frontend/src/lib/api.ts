@@ -3195,6 +3195,94 @@ export const api = {
       }>
       count: number
     }>(`/api/custom/t-signal/positions/${symbol}/signals?limit=${limit}`),
+
+  // ===== 免费实时行情 (统一行情模块, L2 扩展) =====
+  freeRealtimeGetConfig: () =>
+    request<{
+      enabled: boolean
+      interval_sec: number
+      sources: string[]
+      trading_hours_only: boolean
+      retention_days: number
+      modules: { position_t: boolean; overbought_oversold: boolean; watchlist: boolean }
+      overbought_pct: number
+      oversold_pct: number
+      available_sources: string[]
+    }>('/api/free-realtime/config'),
+  freeRealtimePutConfig: (patch: Record<string, unknown>) =>
+    request<Record<string, unknown>>('/api/free-realtime/config', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+  freeRealtimeStatus: () =>
+    request<{
+      running: boolean
+      enabled: boolean
+      interval_sec: number
+      sources: string[]
+      trading_hours_only: boolean
+      last_tick_ms: number
+      last_error: string
+      last_symbol_count: number
+      last_source: string
+      breaker_stats: { fails: Record<string, number>; broken_until: Record<string, number> }
+      store_stats: { retention_days: number; files: Record<string, number> }
+      modules: { position_t: boolean; overbought_oversold: boolean; watchlist: boolean }
+    }>('/api/free-realtime/status'),
+  freeRealtimeStart: () =>
+    request<{ ok: boolean }>('/api/free-realtime/start', { method: 'POST' }),
+  freeRealtimeStop: () =>
+    request<{ ok: boolean }>('/api/free-realtime/stop', { method: 'POST' }),
+  freeRealtimePrune: () =>
+    request<{ ok: boolean; removed_dirs: number }>('/api/free-realtime/prune', { method: 'POST' }),
+  freeRealtimeIntraday: (symbol: string, kind: 'real' | 'mock' = 'real', days = 1) =>
+    request<{
+      symbol: string
+      count: number
+      rows: Array<Record<string, number | string>>
+    }>(`/api/free-realtime/intraday/${encodeURIComponent(symbol)}?kind=${kind}&days=${days}`),
+
+  // ===== 免费实时行情: 测试页端点 (绕过交易时段/全局开关) =====
+  freeRealtimeTestMockConfig: () =>
+    request<{
+      config: {
+        symbols: string[]
+        base_prices: Record<string, number>
+        names: Record<string, string>
+        volatility_pct: number
+        fail_rate: number
+        seed: number
+        interval_seconds: number
+        acceleration: number
+      }
+      running: boolean
+      accelerations: number[]
+    }>('/api/free-realtime/test/mock/config'),
+  freeRealtimeTestMockPutConfig: (patch: Record<string, unknown>) =>
+    request<{ config: Record<string, unknown>; running: boolean }>(
+      '/api/free-realtime/test/mock/config',
+      { method: 'PUT', body: JSON.stringify(patch) },
+    ),
+  freeRealtimeTestMockStart: () =>
+    request<{ ok: boolean }>('/api/free-realtime/test/mock/start', { method: 'POST' }),
+  freeRealtimeTestMockStop: () =>
+    request<{ ok: boolean }>('/api/free-realtime/test/mock/stop', { method: 'POST' }),
+  freeRealtimeTestRealStart: () =>
+    request<{ ok: boolean }>('/api/free-realtime/test/real/start', { method: 'POST' }),
+  freeRealtimeTestRealStop: () =>
+    request<{ ok: boolean }>('/api/free-realtime/test/real/stop', { method: 'POST' }),
+  freeRealtimeTestStatus: () =>
+    request<{
+      mock_running: boolean
+      real_loop_running: boolean
+      last_tick_ms: number
+      tick_count: number
+    }>('/api/free-realtime/test/status'),
+  freeRealtimeTestClear: (kind: 'real' | 'mock') =>
+    request<{ ok: boolean; removed: number; kind: string }>(
+      `/api/free-realtime/test/clear?kind=${kind}`,
+      { method: 'POST' },
+    ),
 }
 
 // ===== Pipeline =====

@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import logging
-import math
 import time
-from datetime import date
 
 import anyio
 import polars as pl
@@ -67,7 +65,7 @@ def _with_names(rows: list[dict], request: Request) -> list[dict]:
         if not name_by_symbol:
             return rows
         return [{**row, "name": name_by_symbol.get(row.get("symbol"))} for row in rows]
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.debug("attach watchlist names failed: %s", e)
         return rows
 
@@ -185,7 +183,7 @@ async def import_from_image(request: Request, file: UploadFile = File(...)):
         raise HTTPException(400, str(e)) from e
     except RuntimeError as e:
         raise HTTPException(503, str(e)) from e
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("watchlist import-image failed")
         raise HTTPException(500, f"识别失败: {e}") from e
 
@@ -367,8 +365,8 @@ def watchlist_enriched(
     if ext_specs:
         db = repo.store.db
         data_dir = repo.store.data_dir
-        from app.services.ext_data import ExtConfigStore
         from app.api.ext_data import _read_ext_dataframe
+        from app.services.ext_data import ExtConfigStore
 
         ext_store = ExtConfigStore(data_dir)
         configs = {c.id: c for c in ext_store.load_all()}
@@ -444,3 +442,32 @@ def _parse_ext_columns(ext_columns: str) -> list[tuple[str, str]]:
         if config_id and field_name and is_valid_ext_ident(config_id):
             result.append((config_id, field_name))
     return result
+
+
+# ── 免费实时行情: 个股开关 ────────────────────────────────────
+@router.get("/free-realtime/status")
+def watchlist_free_realtime_status() -> dict:
+    """自选股 free_realtime 模块状态 + 全局开关 + 个股黑名单。"""
+    from app.services.free_realtime import config as fr_config
+
+    return {
+        "module_enabled": fr_config.get_module_enabled("watchlist"),
+        "global_enabled": fr_config.get_global_enabled(),
+        "disabled_symbols": fr_config.list_disabled_symbols("watchlist"),
+    }
+
+
+class FreeRealtimeSymbolToggle(BaseModel):
+    enabled: bool
+
+
+@router.put("/free-realtime/{symbol}")
+def watchlist_free_realtime_toggle(symbol: str, payload: FreeRealtimeSymbolToggle) -> dict:
+    """设置自选股 free_realtime 个股开关。"""
+    from app.services.free_realtime import config as fr_config
+
+    sym = symbol.strip().upper()
+    return {
+        "symbol": sym,
+        "enabled": fr_config.set_symbol_enabled("watchlist", sym, payload.enabled),
+    }

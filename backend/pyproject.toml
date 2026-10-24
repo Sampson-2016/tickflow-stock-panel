@@ -86,7 +86,12 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
-ignore = ["E501"]   # 长行交给 fmt
+ignore = [
+    "E501",     # 长行交给 fmt
+    "RUF001",   # 中文 docstring 全角标点（歧义字符），中文项目自然书写
+    "RUF002",   # 同上
+    "RUF003",   # 中文注释全角标点
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
