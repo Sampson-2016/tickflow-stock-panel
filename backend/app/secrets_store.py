@@ -70,21 +70,25 @@ def get_tickflow_key() -> str:
 
 
 def get_ai_key() -> str:
-    """取当前 AI Key:secrets.json 优先,否则 .env。"""
+    """取当前 AI Key:secrets.json 优先,否则 .env。
+
+    统一 strip:粘贴 Key 时带尾随空格/换行会让 httpx 抛
+    LocalProtocolError(Illegal header value),连接层直接失败。
+    """
     val = load().get("ai_api_key")
     if val:
-        return val
+        return str(val).strip()
     from app.config import settings
-    return settings.ai_api_key or ""
+    return (settings.ai_api_key or "").strip()
 
 
 def get_ai_config(key: str, default: str = "") -> str:
     """取 AI 配置项:secrets.json 优先,否则 config。"""
     val = load().get(key)
     if val:
-        return val
+        return str(val).strip()
     from app.config import settings
-    return getattr(settings, key, default) or default
+    return (getattr(settings, key, default) or default).strip()
 
 
 def get_ai_config_int(key: str, default: int) -> int:

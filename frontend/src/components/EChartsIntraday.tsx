@@ -202,6 +202,9 @@ function buildTickOption(
     type: 'bar',
     xAxisIndex: 1,
     yAxisIndex: 1,
+    // 分钟模式同样给柱宽上限，防止数据稀疏时巨柱
+    barMaxWidth: 6,
+    barMinWidth: 1,
     data: volPairs.map(([t, v], i) => ({
       value: [t, v],
       itemStyle: {
@@ -635,6 +638,11 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         xAxisIndex: 1,
         yAxisIndex: 1,
         cursor: 'crosshair',
+        // time 轴上 ECharts 按相邻点最小间隔自动推算柱宽：
+        // tick 稀疏时（如 1x mock 首分钟只有 1-2 个点）会算出占轴 2/3 的巨柱，
+        // 必须给上限；同时保底下限避免密集时不可见
+        barMaxWidth: 6,
+        barMinWidth: 1,
       },
     ],
   }

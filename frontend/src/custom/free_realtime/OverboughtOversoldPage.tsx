@@ -10,7 +10,6 @@ import {
   Play,
   Plus,
   RefreshCcw,
-  Search,
   Trash2,
   TrendingDown,
   TrendingUp,
@@ -45,7 +44,6 @@ export function OverboughtOversoldPage() {
   const [selectedSymbol, setSelectedSymbol] = useState('')
   const [configCollapsed, setConfigCollapsed] = useState(true)
   const [filter, setFilter] = useState<'all' | 'signals' | 'enabled'>('all')
-  const [search, setSearch] = useState('')
   const [addOpen, setAddOpen] = useState(false)
 
   // 调度器状态（用于分时图持续刷新）
@@ -126,14 +124,12 @@ export function OverboughtOversoldPage() {
 
   // 过滤后的列表
   const filteredSymbols = useMemo(() => {
-    const q = search.trim().toUpperCase()
     return symbols.filter((s) => {
-      if (q && !s.symbol.includes(q) && !s.name.toUpperCase().includes(q)) return false
       if (filter === 'enabled' && !s.enabled) return false
       if (filter === 'signals' && !signalBySymbol.has(s.symbol)) return false
       return true
     })
-  }, [symbols, search, filter, signalBySymbol])
+  }, [symbols, filter, signalBySymbol])
 
   // 首次有标的时自动选中第一个
   if (!selectedSymbol && filteredSymbols.length > 0) {
@@ -214,15 +210,6 @@ export function OverboughtOversoldPage() {
               {/* 左侧标的列表 — 对齐持仓 T 列表样式 */}
               <div className="rounded border border-border bg-elevated/30 flex flex-col min-h-[560px]">
                 <div className="p-2 border-b border-border space-y-2">
-                  <div className="relative">
-                    <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted" />
-                    <input
-                      className={`${INPUT_CLS} pl-7`}
-                      placeholder="代码 / 名称"
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                    />
-                  </div>
                   <div className="flex gap-1">
                     {([
                       ['all', '全部'],
@@ -243,14 +230,14 @@ export function OverboughtOversoldPage() {
                       </button>
                     ))}
                   </div>
-                  <div className="flex gap-1.5 items-center">
+                  <div className="flex justify-end">
                     <button
                       type="button"
-                      className={BTN_SM_PRIMARY + ' flex-1'}
+                      className={BTN_SM_PRIMARY}
                       onClick={() => setAddOpen(true)}
                       title="添加到超买超卖监控"
                     >
-                      <Plus className="h-3.5 w-3.5" /> 添加标的
+                      <Plus className="h-3 w-3" /> 添加
                     </button>
                   </div>
                 </div>
