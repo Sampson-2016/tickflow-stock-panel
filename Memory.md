@@ -195,7 +195,10 @@ frontend/src/lib/queryKeys.ts
 
 ## 5. 启动 / 测试 / 部署命令
 
-### 5.1 开发模式（推荐二次开发使用）
+> **本地 mac 开发一句话：直接 `./dev.sh`，不需要 Docker。**
+> Docker 仅用于服务器部署 / CI，详见 §5.5（本地 mac 可跳过）。
+
+### 5.1 开发模式（本地 mac 唯一推荐方式）
 
 ```bash
 # 前置：Python ≥ 3.11 · Node ≥ 20 · uv · pnpm
@@ -257,9 +260,11 @@ uv run mypy app/path.py                         # 类型检查（可选）
 
 `pyproject.toml` 配置：`ruff line-length=100`、`target-version=py311`、`pytest asyncio_mode=auto`。
 
-### 5.5 Docker 部署
+### 5.5 服务器部署 / CI（本地 mac 不用，仅远程场景）
 
-预构建镜像（最快，无需本地编译）：
+> 本地 mac 开发**不使用** Docker，直接走 §5.1。本节仅用于服务器部署、CI 自构建、镜像分发等远程场景。
+
+预构建镜像（服务器最快，无需本地编译）：
 
 ```bash
 mkdir -p data
