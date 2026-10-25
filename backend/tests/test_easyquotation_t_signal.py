@@ -274,6 +274,60 @@ class TestOnRealtimeDf:
         assert q.get("name") == "贵州茅台"
         assert q.get("now") == 1500.0
 
+    def test_gate_suppresses_persist_and_escalates_on_deepen(self, fresh_module, monkeypatch):
+        """闸门回归: 同条件持续不再重复推, 恶化跨档重推, 解除复位。
+
+        复现用户场景: 股价长期挂在 -10% 超卖 → 不应每 60s 轰炸飞书;
+        -10% → -20% 跨档 → 重推一次。
+        """
+        import polars as pl
+
+        from app.data_providers.free_realtime.schemas import FREE_REALTIME_SCHEMA
+
+        mod = fresh_module
+        # 防抖间隔设 0: 测试轮次在同一秒内完成, 否则再触发会被 60s 防抖吞掉
+        mod.save_config({"cooldown_seconds": 0})
+        monkeypatch.setattr(mod.fr_config, "get_module_enabled", lambda m: m == "position_t")
+        poller = mod.POLLER
+        monkeypatch.setattr(poller._positions, "list_enabled_symbols", lambda: ["600519.SH"])
+        monkeypatch.setattr(poller, "_count_signals", lambda n: None)
+
+        pushed: list[list] = []
+        monkeypatch.setattr(poller._pusher, "push", lambda sigs: pushed.append(list(sigs)))
+
+        def _df(change_pct: float):
+            last = 10.0 * (1 + change_pct / 100)
+            row = {
+                "symbol": "600519.SH", "name": "贵州茅台", "asset_type": "stock",
+                "last_price": last, "open": 10.0, "prev_close": 10.0,
+                "high": last, "low": 9.9, "change_pct": change_pct / 100,
+                "volume": 100000.0, "amount": 1.5e9,
+                "bid1_price": last, "ask1_price": last,
+                "bid1_volume": 100.0, "ask1_volume": 100.0,
+                "source": "sina", "ts_ms": 1, "trade_date": datetime.now().date(),
+            }
+            return pl.DataFrame([row], schema=FREE_REALTIME_SCHEMA)
+
+        # 第一轮: -3.6% (阈值 3% → 档位 1) → fire 推送
+        poller.on_realtime_df(_df(-3.6), source="mock")
+        assert len(pushed) == 1
+        # 第二轮: 仍 -3.6% → 持续静默, 不推
+        poller.on_realtime_df(_df(-3.6), source="mock")
+        assert len(pushed) == 1
+        # 第三轮: 恶化到 -6.5% (档位 2) → escalate 重推
+        poller.on_realtime_df(_df(-6.5), source="mock")
+        assert len(pushed) == 2
+        assert pushed[1][0].change_pct == pytest.approx(-6.5)
+        # 第四轮: 回到 -6.5% 以内但仍超阈值 (-4%) → 持续静默
+        poller.on_realtime_df(_df(-4.0), source="mock")
+        assert len(pushed) == 2
+        # 第五轮: 解除 (-1%, 未超阈值, 无信号) → 复位
+        poller.on_realtime_df(_df(-1.0), source="mock")
+        assert len(pushed) == 2
+        # 第六轮: 再次触发 → 重新 fire 推送
+        poller.on_realtime_df(_df(-3.6), source="mock")
+        assert len(pushed) == 3
+
 
 # ── SignalEvaluator 三件套规则 ─────────────────────────────
 

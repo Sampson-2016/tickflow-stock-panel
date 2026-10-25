@@ -972,37 +972,47 @@ def _get_repo_from_app():
     return None
 
 
-# 同股同方向推送冷却：60s 内同标的同方向只推一次（mock 高频轮询会反复触发）
-_oo_push_cooldown: dict[str, float] = {}
-_OO_PUSH_COOLDOWN_SEC = 60.0
+# 推送闸门（边沿触发）：条件持续期间不重复推，仅「进入条件」与「恶化跨档」放行，
+# 替代旧的固定 60s 时间冷却（旧逻辑在长期超卖/超买时每分钟轰炸一次）
+from app.services.free_realtime.signal_gate import SignalGate  # noqa: E402
+
+_oo_push_gate = SignalGate()
 
 
 def _push_overbought_signals(sigs, source: str = "real") -> None:
     """超买超卖信号推送 — 复用 review_push_channels。mock 链路带 [MOCK] 前缀。
 
-    消息抑制：同股同方向 60s 内只推送一次。
+    消息抑制：边沿触发（SignalGate）——
+      进入条件推 1 次；持续期间静默；偏离恶化跨档（偏离量再深一个阈值档）重报
+      「继续恶化」；解除不推送。
     """
+    # 闸门状态更新放在 channels 判断之前：即使未配置推送渠道，
+    # 状态也要随行情推进（避免启用渠道后残留旧状态抑制首条信号）
+    from app.services.free_realtime import overbought_oversold
+
+    now_s = time.time()
+    seen: set[str] = set()
+    pending: list[tuple[str, dict]] = []
+    escalated: set[str] = set()
+    for s in sigs:
+        d = overbought_oversold.to_dict(s)
+        key = f"{d['symbol']}:{d['direction']}"
+        seen.add(key)
+        thr = d.get("threshold_pct") or 0.0
+        level = int(abs(d["deviation_pct"]) / thr) if thr > 0 else 0
+        act = _oo_push_gate.feed(key, True, level=level, now=now_s)
+        if act:
+            pending.append((key, d))
+            if act == "escalate":
+                escalated.add(key)
+    _oo_push_gate.sweep(seen)
+
     # try 只包推送调用本身：信号组装/名称解析的 bug 不应被静默吞掉
     try:
-        import time as _time
-
         from app.services import preferences, webhook_adapter
-        from app.services.free_realtime.overbought_oversold import to_dict
 
         channels = preferences.get_review_push_channels()
-        if not channels:
-            return
-        now_s = _time.time()
-        pending: list[dict] = []
-        for s in sigs:
-            d = to_dict(s)
-            key = f"{d['symbol']}:{d['direction']}"
-            last = _oo_push_cooldown.get(key, 0.0)
-            if now_s - last < _OO_PUSH_COOLDOWN_SEC:
-                continue
-            _oo_push_cooldown[key] = now_s
-            pending.append(d)
-        if not pending:
+        if not channels or not pending:
             return
         mock_tag = "[MOCK] " if source == "mock" else ""
         # 中文名兜底：mock 链路 name 可能回落为代码本身；
@@ -1017,7 +1027,7 @@ def _push_overbought_signals(sigs, source: str = "real") -> None:
             logger.debug("overbought name_map build failed: %s", e)
             name_map = {}
         lines = []
-        for d in pending:
+        for key, d in pending:
             arrow = "↑超买" if d["direction"] == "overbought" else "↓超卖"
             name = d["name"]
             if not name or name == d["symbol"]:
@@ -1027,10 +1037,11 @@ def _push_overbought_signals(sigs, source: str = "real") -> None:
                 f"{name}({d['symbol']})" if name and name != d["symbol"]
                 else d["symbol"]
             )
+            suffix = " （偏离继续恶化）" if key in escalated else ""
             lines.append(
                 f"- {head} 现 {d['last_price']:.2f} "
                 f"MA5 {d['ma5']:.2f} 偏离 {d['deviation_pct']:+.2f}% "
-                f"阈值 {d['threshold_pct']:.2f}% {arrow}"
+                f"阈值 {d['threshold_pct']:.2f}% {arrow}{suffix}"
             )
         body = "\n".join(lines)
         title = f"{mock_tag}超买超卖提示"

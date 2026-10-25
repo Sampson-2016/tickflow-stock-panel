@@ -50,6 +50,7 @@ from app.extensions import (  # noqa: E402
 )
 from app.markets import is_trading_now, market_of  # noqa: E402
 from app.services.free_realtime import config as fr_config  # noqa: E402
+from app.services.free_realtime.signal_gate import SignalGate  # noqa: E402
 
 # ================================================================
 # 配置
@@ -972,7 +973,7 @@ class TSignalPoller:
         self._thread: threading.Thread | None = None
         self._fetcher = QuoteFetcher()
         self._evaluator = SignalEvaluator()
-        self._cooldown = CooldownTracker()
+        self._gate = SignalGate()
         self._store = SignalStore(settings.data_dir)
         self._positions = PositionTStore()
         self._intraday = IntradayKlineStore()
@@ -1106,13 +1107,8 @@ class TSignalPoller:
 
         signals = self._evaluator.evaluate(quotes, cfg, now_ms)
 
-        # cooldown 过滤 + 落盘 + 计数
-        cooldown = int(cfg["cooldown_seconds"])
-        accepted: list[TSignal] = []
-        for s in signals:
-            if self._cooldown.allow(s.symbol, s.kind, cooldown):
-                accepted.append(s)
-                self._store.append(s)
+        # 边沿闸门过滤 (替代纯时间冷却) + 落盘 + 计数
+        accepted = self._gate_filter_signals(signals, cfg)
 
         # 今日计数
         self._count_signals(len(accepted))
@@ -1190,18 +1186,37 @@ class TSignalPoller:
         if source != "real":
             for s in signals:
                 s.source = source
-        cooldown = int(cfg["cooldown_seconds"])
-        accepted: list[TSignal] = []
-        for s in signals:
-            if self._cooldown.allow(s.symbol, s.kind, cooldown):
-                accepted.append(s)
-                self._store.append(s)
+        # 边沿闸门过滤 (替代纯时间冷却) + 落盘 + 计数
+        accepted = self._gate_filter_signals(signals, cfg)
 
         # 今日计数
         self._count_signals(len(accepted))
 
         if accepted and cfg["auto_push_to_feishu"]:
             self._pusher.push(accepted)
+
+    def _gate_filter_signals(self, signals: list[TSignal], cfg: dict[str, Any]) -> list[TSignal]:
+        """边沿触发的推送闸门（替代纯时间冷却）。
+
+        - 条件由无到有 → 推 1 次 (fire)
+        - 条件持续 → 静默；仅价格异动偏离跨新档 (|涨跌幅| 再深一个阈值) 重报
+        - 条件解除 → 静默复位，不推送
+        cooldown_seconds 配置继续作为防抖间隔 (再放行最小间隔)。
+        """
+        cooldown = int(cfg["cooldown_seconds"])
+        threshold = float(cfg.get("price_change_pct_threshold") or 0.0)
+        accepted: list[TSignal] = []
+        seen: set[tuple[str, str]] = set()
+        for s in signals:
+            key = (s.symbol, s.kind)
+            seen.add(key)
+            level = int(abs(s.change_pct) / threshold) if (s.kind == KIND_PRICE and threshold > 0) else 0
+            if self._gate.feed(key, True, level=level, min_refire_sec=cooldown):
+                accepted.append(s)
+                self._store.append(s)
+        # 本轮未出现的 (symbol, kind) 视为条件解除 → 静默复位
+        self._gate.sweep(seen)
+        return accepted
 
 
 # ── 模块单例 ─────────────────────────────────────────────────────
