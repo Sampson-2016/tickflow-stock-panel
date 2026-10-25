@@ -65,6 +65,16 @@ def _df(rows):
 
 
 @pytest.fixture(autouse=True)
+def _clear_closes_cache():
+    """清空日线缓存, 防止 FakeRepo 回收后 id 复用导致跨用例串数据。"""
+    from app.services.free_realtime import overbought_oversold as _oo
+
+    _oo._closes_cache.clear()
+    yield
+    _oo._closes_cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def _enable_module(monkeypatch):
     """强制开启超买超卖模块，避免被默认关闭拦截。"""
     monkeypatch.setattr(
@@ -132,6 +142,46 @@ class TestEvaluate:
         repo = FakeRepo({"600000.SH": [10.0, 10.0, 10.0, 10.0]})
         df = _df([_row("600000.SH", 100.0)])
         assert evaluate(df, repo) == []
+
+    def test_overbought_list_stopped_symbol_skipped(self, monkeypatch):
+        """清单中 enabled=False 的标的，即使随统一行情广播流入也不评估。
+
+        复现用户场景: 超买超卖页停止中际旭创，持仓T页开启同一标的，
+        mock/real 广播 df 含该标的 → 超买超卖模块必须跳过，不得推送。
+        """
+        monkeypatch.setattr(
+            fr_config, "list_overbought_symbols",
+            lambda: [{
+                "symbol": "300308.SZ", "name": "中际旭创", "enabled": False,
+                "overbought_pct": None, "oversold_pct": None,
+            }],
+        )
+        repo = FakeRepo({
+            "300308.SZ": [10.0, 10.0, 10.0, 10.0],
+            "600000.SH": [10.0, 10.0, 10.0, 10.0],
+        })
+        # last_price=100 → 偏离远超阈值，若不过滤必然触发信号
+        df = _df([_row("300308.SZ", 100.0), _row("600000.SH", 12.0)])
+        sigs = evaluate(df, repo)
+        # 中际旭创被跳过；清单外的 600000.SH（持仓T 流入）用全局默认阈值正常评估
+        assert [s.symbol for s in sigs] == ["600000.SH"]
+
+    def test_overbought_list_enabled_symbol_still_evaluated(self, monkeypatch):
+        """清单中 enabled=True 的标的阈值评估行为不受影响。"""
+        monkeypatch.setattr(
+            fr_config, "list_overbought_symbols",
+            lambda: [{
+                "symbol": "300308.SZ", "name": "中际旭创", "enabled": True,
+                "overbought_pct": 3.0, "oversold_pct": None,
+            }],
+        )
+        repo = FakeRepo({"300308.SZ": [10.0, 10.0, 10.0, 10.0]})
+        df = _df([_row("300308.SZ", 10.2)])  # ma5=(40+10.2)/5=10.04, 偏离 +1.59% < 3% 不触发
+        assert evaluate(df, repo) == []
+        df2 = _df([_row("300308.SZ", 10.6)])  # ma5=(40+10.6)/5=10.12, 偏离 +4.74% ≥ 3% 触发
+        sigs = evaluate(df2, repo)
+        assert [s.symbol for s in sigs] == ["300308.SZ"]
+        assert sigs[0].threshold_pct == pytest.approx(3.0)
 
     def test_module_disabled_returns_empty(self, monkeypatch):
         monkeypatch.setattr(fr_config, "get_module_enabled", lambda mod: False)

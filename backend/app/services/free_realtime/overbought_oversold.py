@@ -113,6 +113,12 @@ def evaluate(
             float(os_) if os_ is not None else default_os,
         )
     disabled = set(fr_config.list_disabled_symbols("overbought_oversold"))
+    # 超买超卖页面「停止」写的是标的清单项的 enabled 字段（见 config.set_overbought_symbol_enabled），
+    # 与上面的通用个股开关键是两份状态。持仓T/自选股开启的标的会随统一行情广播流入本模块，
+    # 若清单里已停止的标的不在此处过滤，仍会被评估并推送（mock/real 链路同病）。
+    disabled.update(
+        it["symbol"] for it in fr_config.list_overbought_symbols() if not it.get("enabled", True)
+    )
 
     out: list[OverboughtSignal] = []
     for row in df.iter_rows(named=True):
