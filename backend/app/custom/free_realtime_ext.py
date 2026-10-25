@@ -472,7 +472,8 @@ def get_collect_symbols() -> dict:
         try:
             from app.custom.easyquotation_t_signal import POLLER
             from app.services.free_realtime import config as fr_config
-            return (fr_config.get_global_enabled() and fr_config.get_module_enabled("position_t")
+            # 与 collector 同口径：仅看模块开关（mock 循环绕过全局开关）
+            return (fr_config.get_module_enabled("position_t")
                     and sym in POLLER.positions().list_enabled_symbols())
         except Exception:
             return False

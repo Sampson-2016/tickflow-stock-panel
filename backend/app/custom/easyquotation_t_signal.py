@@ -1357,8 +1357,10 @@ def startup(context: ExtensionContext) -> None:
         scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
 
         def _position_t_collector() -> list[str]:
-            # 运行时校验：模块关闭时不返回标的
-            if not (fr_config.get_global_enabled() and fr_config.get_module_enabled("position_t")):
+            # 运行时校验：仅看模块开关，不看全局开关。
+            # 全局开关只约束 real 调度器主循环（_tick 自查）；mock 测试页循环
+            # 设计上绕过全局开关，若 collector 也卡全局开关，持仓T标的会被漏掉。
+            if not fr_config.get_module_enabled("position_t"):
                 return []
             return list(POLLER.positions().list_enabled_symbols())
 
