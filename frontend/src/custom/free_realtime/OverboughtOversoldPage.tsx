@@ -20,6 +20,7 @@ import { EmptyState } from '@/components/EmptyState'
 import { StockPanel } from '@/components/StockPanel'
 import { toast } from '@/components/Toast'
 import { api } from '@/lib/api'
+import { AddPositionDialog } from '@/custom/easyquotation_t_signal/AddPositionDialog'
 import {
   BTN_GHOST,
   BTN_PRIMARY,
@@ -44,8 +45,7 @@ export function OverboughtOversoldPage() {
   const [configCollapsed, setConfigCollapsed] = useState(true)
   const [filter, setFilter] = useState<'all' | 'signals' | 'enabled'>('all')
   const [search, setSearch] = useState('')
-  const [newSymbol, setNewSymbol] = useState('')
-  const [newName, setNewName] = useState('')
+  const [addOpen, setAddOpen] = useState(false)
 
   // 调度器状态（用于分时图持续刷新）
   const statusQ = useQuery({
@@ -95,8 +95,6 @@ export function OverboughtOversoldPage() {
       freeRealtimeApi.overboughtSymbolAdd(symbol, name),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: symbolsKey() })
-      setNewSymbol('')
-      setNewName('')
     },
     onError: (e: Error) => console.error('add overbought symbol failed', e),
   })
@@ -241,40 +239,14 @@ export function OverboughtOversoldPage() {
                       </button>
                     ))}
                   </div>
-                  <div className="flex gap-1.5">
-                    <input
-                      className={`${INPUT_CLS} flex-1 min-w-0`}
-                      placeholder="标的代码（如 600000.SH）"
-                      value={newSymbol}
-                      onChange={(e) => setNewSymbol(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && newSymbol.trim() && !addMut.isPending) {
-                          addMut.mutate({ symbol: newSymbol.trim(), name: newName.trim() || undefined })
-                        }
-                      }}
-                    />
-                    <input
-                      className={`${INPUT_CLS} w-28`}
-                      placeholder="名称（可选）"
-                      value={newName}
-                      onChange={(e) => setNewName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && newSymbol.trim() && !addMut.isPending) {
-                          addMut.mutate({ symbol: newSymbol.trim(), name: newName.trim() || undefined })
-                        }
-                      }}
-                    />
+                  <div className="flex gap-1.5 items-center">
                     <button
                       type="button"
-                      className={BTN_SM_PRIMARY + ' shrink-0'}
-                      onClick={() =>
-                        newSymbol.trim() &&
-                        addMut.mutate({ symbol: newSymbol.trim(), name: newName.trim() || undefined })
-                      }
-                      disabled={!newSymbol.trim() || addMut.isPending}
+                      className={BTN_SM_PRIMARY + ' flex-1'}
+                      onClick={() => setAddOpen(true)}
                       title="添加到超买超卖监控"
                     >
-                      <Plus className="h-3.5 w-3.5" /> 添加
+                      <Plus className="h-3.5 w-3.5" /> 添加标的
                     </button>
                   </div>
                 </div>
@@ -367,6 +339,13 @@ export function OverboughtOversoldPage() {
           </>
         )}
       </div>
+      <AddPositionDialog
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        title="添加超买超卖标的"
+        hideHkInput
+        onAdd={(symbol, name) => addMut.mutateAsync({ symbol, name })}
+      />
     </div>
   )
 }

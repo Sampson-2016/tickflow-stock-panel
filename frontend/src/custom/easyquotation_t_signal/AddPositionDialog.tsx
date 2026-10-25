@@ -8,6 +8,15 @@ interface Props {
   open: boolean
   onClose: () => void
   onAdded?: (item: PositionTItem) => void
+  /** 弹窗标题（默认「添加持仓 T 标的」） */
+  title?: string
+  /**
+   * 自定义添加实现（symbol, name）→ 成功后返回值传给 onAdded。
+   * 缺省走 tSignalApi.addPosition，供其他二开模块（如超买超卖）复用本弹窗。
+   */
+  onAdd?: (symbol: string, name?: string) => Promise<unknown>
+  /** 港股快捷输入不可用时隐藏（默认显示） */
+  hideHkInput?: boolean
 }
 
 interface SearchHit {
@@ -23,7 +32,7 @@ interface SearchHit {
  * A 股 / ETF 用搜索框（与自选添加一致）；港股用单独快捷输入（项目 search 端点
  * 默认 market=cn 不返回港股, 这是底层 API 的限制而非本模块选择)。
  */
-export function AddPositionDialog({ open, onClose, onAdded }: Props) {
+export function AddPositionDialog({ open, onClose, onAdded, title, onAdd, hideHkInput }: Props) {
   const [query, setQuery] = useState('')
   const [open_, setOpen] = useState(false)
   const [activeIdx, setActiveIdx] = useState(-1)
@@ -68,11 +77,11 @@ export function AddPositionDialog({ open, onClose, onAdded }: Props) {
   }, [open])
 
   const addMutation = useMutation({
-    mutationFn: ({ s, n }: { s: string; n?: string }) => tSignalApi.addPosition(s, n),
+    mutationFn: ({ s, n }: { s: string; n?: string }) => (onAdd ? onAdd(s, n) : tSignalApi.addPosition(s, n)),
     onSuccess: (item) => {
       setError(null)
       void qc.invalidateQueries({ queryKey: ['t-signal', 'positions'] })
-      onAdded?.(item)
+      onAdded?.(item as PositionTItem)
       onClose()
     },
     onError: (e) => {
@@ -122,7 +131,7 @@ export function AddPositionDialog({ open, onClose, onAdded }: Props) {
       >
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-medium text-foreground flex items-center gap-2">
-            <Plus className="h-4 w-4 text-accent" /> 添加持仓 T 标的
+            <Plus className="h-4 w-4 text-accent" /> {title ?? '添加持仓 T 标的'}
           </h3>
           <button
             type="button"
@@ -179,6 +188,8 @@ export function AddPositionDialog({ open, onClose, onAdded }: Props) {
         </div>
 
         {/* 分隔线 + 港股快速输入 */}
+        {!hideHkInput && (
+          <>
         <div className="my-4 flex items-center gap-3">
           <div className="flex-1 h-px bg-border" />
           <span className="text-[11px] text-muted">或港股代码</span>
@@ -218,6 +229,8 @@ export function AddPositionDialog({ open, onClose, onAdded }: Props) {
         <p className="text-[11px] text-muted mb-3">
           项目 search 端点默认只返回 A 股/ETF; 港股 (.HK 后缀) 走此快捷入口。
         </p>
+          </>
+        )}
 
         {error && <p className="mb-2 text-xs text-warn">{error}</p>}
 
