@@ -262,6 +262,87 @@ def get_overbought_oversold_signals() -> dict:
     }
 
 
+# ── 超买超卖收盘报告端点 ───────────────────────────────────
+class OoReportGenerateIn(BaseModel):
+    categories: list[str] | None = None  # 缺省用已存偏好
+    push: bool = True
+
+
+class OoReportConfigIn(BaseModel):
+    schedule_enabled: bool | None = None
+    schedule_time: str | None = None  # "HH:MM"
+    categories: list[str] | None = None
+    ai_commentary: bool | None = None
+    prompt: str | None = None  # 空串 = 恢复内置默认
+
+
+@router.post("/overbought-oversold/report")
+def post_oo_report(payload: OoReportGenerateIn) -> dict:
+    """手动生成收盘报告（评估 → AI 总结 → 归档 → 推送）。"""
+    from app.services.free_realtime import report as oo_report
+
+    try:
+        return oo_report.generate_report(payload.categories, push=payload.push)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@router.get("/overbought-oversold/reports")
+def get_oo_reports() -> dict:
+    """收盘报告归档列表（按日期倒序）。"""
+    from app.services.free_realtime import report as oo_report
+
+    return {"reports": oo_report.list_archives()}
+
+
+@router.get("/overbought-oversold/reports/{trade_date}")
+def get_oo_report_detail(trade_date: str) -> dict:
+    """单份收盘报告归档详情。"""
+    from app.services.free_realtime import report as oo_report
+
+    data = oo_report.load_archive(trade_date)
+    if data is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    return data
+
+
+@router.get("/overbought-oversold/report-config")
+def get_oo_report_config() -> dict:
+    """收盘报告配置（定时/类别/AI/提示词）。"""
+    from app.services import ai_provider
+    from app.services.free_realtime import config as fr_config
+
+    return {
+        "schedule_enabled": fr_config.get_oo_report_schedule_enabled(),
+        "schedule_time": fr_config.get_oo_report_schedule_time(),
+        "categories": fr_config.get_oo_report_categories(),
+        "ai_commentary": fr_config.get_oo_report_ai_enabled(),
+        "prompt": fr_config.get_oo_report_prompt(),
+        "ai_configured": ai_provider.ai_configured(),
+    }
+
+
+@router.put("/overbought-oversold/report-config")
+def put_oo_report_config(payload: OoReportConfigIn) -> dict:
+    """更新收盘报告配置。"""
+    from app.services.free_realtime import config as fr_config
+
+    try:
+        if payload.schedule_enabled is not None:
+            fr_config.set_oo_report_schedule_enabled(payload.schedule_enabled)
+        if payload.schedule_time is not None:
+            fr_config.set_oo_report_schedule_time(payload.schedule_time)
+        if payload.categories is not None:
+            fr_config.set_oo_report_categories(payload.categories)
+        if payload.ai_commentary is not None:
+            fr_config.set_oo_report_ai_enabled(payload.ai_commentary)
+        if payload.prompt is not None:
+            fr_config.set_oo_report_prompt(payload.prompt)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return get_oo_report_config()
+
+
 # ── 测试页端点 ─────────────────────────────────────────────
 class MockConfigIn(BaseModel):
     symbols: list[str] | None = None
@@ -708,6 +789,10 @@ def startup(context: ExtensionContext) -> None:
             logger.warning("overbought_oversold attach failed: %s", e)
 
         fr_scheduler.auto_start_if_enabled()
+
+        # 收盘报告定时守护线程（内部判断开关，未开启时空转）
+        from app.services.free_realtime import report as oo_report
+        oo_report.auto_start_report_scheduler()
     except Exception as e:
         logger.warning("free_realtime scheduler auto-start failed: %s", e)
 

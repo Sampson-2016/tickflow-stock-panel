@@ -21,6 +21,7 @@ import { StockPanel } from '@/components/StockPanel'
 import { toast } from '@/components/Toast'
 import { api } from '@/lib/api'
 import { AddPositionDialog } from '@/custom/easyquotation_t_signal/AddPositionDialog'
+import { OoReportSection } from './OoReportSection'
 import {
   BTN_GHOST,
   BTN_PRIMARY,
@@ -204,6 +205,9 @@ export function OverboughtOversoldPage() {
                 </div>
               )}
             </div>
+
+            {/* 收盘报告（含配置，默认收缩） */}
+            <OoReportSection status={status} />
 
             {/* 列表 + 详情 */}
             <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-3">

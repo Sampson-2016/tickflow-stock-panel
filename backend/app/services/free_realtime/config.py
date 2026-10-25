@@ -294,6 +294,83 @@ def set_overbought_thresholds(overbought: float, oversold: float) -> dict:
     return {"overbought_pct": get_overbought_pct(), "oversold_pct": get_oversold_pct()}
 
 
+# ── 超买超卖收盘报告配置 ────────────────────────────────────
+_OO_REPORT_CATEGORIES = ("reached", "near", "far")
+
+
+def get_oo_report_schedule_enabled() -> bool:
+    """收盘报告定时开关；默认 False。"""
+    return bool(_load().get("oo_report_schedule_enabled", False))
+
+
+def set_oo_report_schedule_enabled(enabled: bool) -> bool:
+    preferences.save({"oo_report_schedule_enabled": bool(enabled)})
+    return get_oo_report_schedule_enabled()
+
+
+def get_oo_report_schedule_time() -> str:
+    """收盘报告定时时间 "HH:MM"；默认 15:10。"""
+    raw = str(_load().get("oo_report_schedule_time", "15:10"))
+    parts = raw.split(":")
+    if len(parts) != 2:
+        return "15:10"
+    try:
+        h, m = int(parts[0]), int(parts[1])
+    except ValueError:
+        return "15:10"
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        return "15:10"
+    return f"{h:02d}:{m:02d}"
+
+
+def set_oo_report_schedule_time(value: str) -> str:
+    parts = str(value).strip().split(":")
+    if len(parts) != 2:
+        raise ValueError("time must be HH:MM")
+    h, m = int(parts[0]), int(parts[1])
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise ValueError("time out of range")
+    preferences.save({"oo_report_schedule_time": f"{h:02d}:{m:02d}"})
+    return get_oo_report_schedule_time()
+
+
+def get_oo_report_categories() -> list[str]:
+    """报告包含的类别子集；默认全选。"""
+    raw = _load().get("oo_report_categories")
+    if not isinstance(raw, list):
+        return list(_OO_REPORT_CATEGORIES)
+    out = [c for c in _OO_REPORT_CATEGORIES if c in raw]
+    return out or list(_OO_REPORT_CATEGORIES)
+
+
+def set_oo_report_categories(categories: list[str]) -> list[str]:
+    cleaned = [c for c in _OO_REPORT_CATEGORIES if c in (categories or [])]
+    if not cleaned:
+        raise ValueError("at least one category required")
+    preferences.save({"oo_report_categories": cleaned})
+    return cleaned
+
+
+def get_oo_report_ai_enabled() -> bool:
+    """报告是否附 AI 总结；默认 True（未配 AI Key 时自动降级）。"""
+    return bool(_load().get("oo_report_ai_commentary", True))
+
+
+def set_oo_report_ai_enabled(enabled: bool) -> bool:
+    preferences.save({"oo_report_ai_commentary": bool(enabled)})
+    return get_oo_report_ai_enabled()
+
+
+def get_oo_report_prompt() -> str:
+    """自定义 AI 提示词；空串 = 用 report.DEFAULT_PROMPT。"""
+    return str(_load().get("oo_report_prompt", ""))
+
+
+def set_oo_report_prompt(prompt: str) -> str:
+    preferences.save({"oo_report_prompt": str(prompt or "")})
+    return get_oo_report_prompt()
+
+
 def _available_set() -> set[str]:
     try:
         from app.data_providers.free_realtime.registry import AVAILABLE_SOURCES

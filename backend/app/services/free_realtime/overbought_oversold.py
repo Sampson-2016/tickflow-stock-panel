@@ -54,7 +54,9 @@ def _load_recent_closes(repository, symbol: str, n: int = 4) -> list[float]:
     end = date.today() - timedelta(days=1)
     start = end - timedelta(days=15)  # 多取一些防止停牌
     try:
-        df: pl.DataFrame = repository.get_daily(symbol, start, end, columns=["raw_close"])
+        df: pl.DataFrame = repository.get_daily(
+            symbol, start, end, columns=["date", "raw_close"]
+        )
     except Exception as e:
         logger.warning("overbought_oversold load %s failed: %s", symbol, e)
         return []

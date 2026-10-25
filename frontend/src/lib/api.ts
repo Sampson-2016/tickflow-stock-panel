@@ -593,6 +593,40 @@ export interface MainlineResult {
   filter: MainlineFilter
 }
 
+// ===== 超买超卖收盘报告 =====
+export interface OoReportRow {
+  symbol: string
+  name: string
+  close: number
+  ma5: number
+  deviation_pct: number
+  threshold_pct: number
+  direction: 'overbought' | 'oversold'
+  category: 'reached' | 'near' | 'far'
+  price_source: 'daily' | 'tick'
+}
+
+export interface OoReportFull {
+  as_of: string
+  trade_date: string
+  categories: string[]
+  evaluated: number
+  reached: OoReportRow[]
+  near: OoReportRow[]
+  far: OoReportRow[]
+  ai_commentary: string | null
+  text: string
+}
+
+export interface OoReportConfig {
+  schedule_enabled: boolean
+  schedule_time: string
+  categories: string[]
+  ai_commentary: boolean
+  prompt: string
+  ai_configured: boolean
+}
+
 // ===== 大盘复盘 =====
 export interface AiReviewReport {
   id: string
@@ -3314,6 +3348,36 @@ export const api = {
       evaluated: number
       error?: string
     }>('/api/free-realtime/overbought-oversold/signals'),
+
+  // ===== 免费实时行情: 超买超卖收盘报告 =====
+  freeRealtimeOoReportGenerate: (categories?: string[], push = true) =>
+    request<OoReportFull>('/api/free-realtime/overbought-oversold/report', {
+      method: 'POST',
+      body: JSON.stringify({ categories: categories ?? null, push }),
+    }),
+  freeRealtimeOoReports: () =>
+    request<{
+      reports: Array<{
+        file: string
+        trade_date: string
+        as_of: string | null
+        categories: string[] | null
+        evaluated: number | null
+        counts: Record<string, number>
+        has_ai: boolean
+      }>
+    }>('/api/free-realtime/overbought-oversold/reports'),
+  freeRealtimeOoReportDetail: (tradeDate: string) =>
+    request<OoReportFull>(
+      `/api/free-realtime/overbought-oversold/reports/${encodeURIComponent(tradeDate)}`,
+    ),
+  freeRealtimeOoReportConfig: () =>
+    request<OoReportConfig>('/api/free-realtime/overbought-oversold/report-config'),
+  freeRealtimeOoReportPutConfig: (patch: Partial<OoReportConfig>) =>
+    request<OoReportConfig>('/api/free-realtime/overbought-oversold/report-config', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
 
   // ===== 免费实时行情: 测试页端点 (绕过交易时段/全局开关) =====
   freeRealtimeTestMockConfig: () =>
