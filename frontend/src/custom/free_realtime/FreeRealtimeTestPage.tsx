@@ -16,101 +16,56 @@ import {
   BTN_SM_PRIMARY,
   BTN_SM_SECONDARY,
   freeRealtimeApi,
-  INPUT_CLS,
   type FreeRealtimeTestStatus,
 } from './api'
-import { IntradayChart } from './IntradayChart'
+import { StockIntradayChart } from '@/components/StockIntradayChart'
 
 const QK = ['free-realtime-test'] as const
-const mockKey = () => [...QK, 'mock-config'] as const
 const statusKey = () => [...QK, 'status'] as const
-
-interface MockDraft {
-  symbols: string
-  base_prices: string
-  names: string
-  volatility_pct: string
-  fail_rate: string
-  seed: string
-  acceleration: number
-}
-
-function parseSymbols(s: string): string[] {
-  return s
-    .split(/[\s,;]+/)
-    .map((x) => x.trim().toUpperCase())
-    .filter(Boolean)
-}
-
-function parseMap(s: string): Record<string, number> | null {
-  const out: Record<string, number> = {}
-  for (const part of s.split(/[\s,;]+/).filter(Boolean)) {
-    const [k, v] = part.split('=')
-    if (!k || !v) return null
-    out[k.trim().toUpperCase()] = parseFloat(v)
-  }
-  return out
-}
-
-function parseNameMap(s: string): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const part of s.split(/[\s,;]+/).filter(Boolean)) {
-    const [k, v] = part.split('=')
-    if (k && v) out[k.trim().toUpperCase()] = v
-  }
-  return out
-}
+const collectKey = () => [...QK, 'collect-symbols'] as const
+// mock 虚拟时钟起点白名单（与后端 _ALLOWED_START_TIMES 一致）
+const START_TIMES = ['09:15', '09:30', '10:30', '11:00', '13:00', '14:00'] as const
 
 export function FreeRealtimeTestPage() {
   const qc = useQueryClient()
-  const mockQ = useQuery({
-    queryKey: mockKey(),
-    queryFn: freeRealtimeApi.testMockConfig,
-  })
   const statusQ = useQuery({
     queryKey: statusKey(),
     queryFn: freeRealtimeApi.testStatus,
-    refetchInterval: 2000,
+    // 运行时高频；停止时低频（10s）仅用于感知用户何时启动循环
+    refetchInterval: (q) => {
+      const d = q.state.data
+      return d && (d.mock_running || d.real_loop_running) ? 2000 : 10000
+    },
   })
-  const [draft, setDraft] = useState<MockDraft | null>(null)
-  const [previewSymbol, setPreviewSymbol] = useState('600000.SH')
-  const [previewKind, setPreviewKind] = useState<'real' | 'mock'>('mock')
-  const [kindAutoSelected, setKindAutoSelected] = useState(false)
+  // 当前 mock/真实循环会拉的标的（来自三个模块 collector）
+  // 仅在运行时轮询；停止时不轮询，避免无谓请求
+  const collectQ = useQuery({
+    queryKey: collectKey(),
+    queryFn: freeRealtimeApi.testCollectSymbols,
+    refetchInterval: () => {
+      const s = statusQ.data
+      return s && (s.mock_running || s.real_loop_running) ? 5000 : false
+    },
+  })
+  const [acceleration, setAcceleration] = useState<number>(1)
+  const [startTime, setStartTime] = useState<string>('09:15')
+  const [previewSymbol, setPreviewSymbol] = useState('')
 
-  // 首次拿到 status 后，根据运行状态自动选 kind（仅一次，不覆盖用户后续手动切换）
-  if (statusQ.data && !kindAutoSelected) {
-    setKindAutoSelected(true)
-    if (statusQ.data.mock_running) {
-      setPreviewKind('mock')
-    } else if (statusQ.data.real_loop_running) {
-      setPreviewKind('real')
-    }
-  }
+  // StockIntradayChart 的 tick 路径需要 date 才会激活；测试页传「今天」即可
+  const todayStr = (() => {
+    const d = new Date()
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  })()
 
-  if (mockQ.data && !draft) {
-    const c = mockQ.data.config
-    setDraft({
-      symbols: (c.symbols || []).join(', '),
-      base_prices: Object.entries(c.base_prices || {})
-        .map(([k, v]) => `${k}=${v}`)
-        .join(', '),
-      names: Object.entries(c.names || {})
-        .map(([k, v]) => `${k}=${v}`)
-        .join(', '),
-      volatility_pct: String(c.volatility_pct ?? 0.01),
-      fail_rate: String(c.fail_rate ?? 0.0),
-      seed: String(c.seed ?? 42),
-      acceleration: c.acceleration ?? 1,
-    })
+  // 首次拿到 collect 结果，自动填预览标的（方便用户立刻看到图）
+  if (collectQ.data && !previewSymbol && collectQ.data.symbols.length > 0) {
+    setPreviewSymbol(collectQ.data.symbols[0])
   }
 
   const putMock = useMutation({
     mutationFn: (patch: Record<string, unknown>) =>
       freeRealtimeApi.testMockPutConfig(patch),
-    onSuccess: () => {
-      toast('mock 配置已保存', 'success')
-      qc.invalidateQueries({ queryKey: mockKey() })
-    },
+    onSuccess: () => toast('加速倍率已保存', 'success'),
     onError: (e: Error) => toast(e.message, 'error'),
   })
 
@@ -132,156 +87,197 @@ export function FreeRealtimeTestPage() {
   })
   const clearMut = useMutation({
     mutationFn: (kind: 'real' | 'mock') => freeRealtimeApi.testClear(kind),
-    onSuccess: (r) => toast(`已清空 ${r.kind} 落盘 (${r.removed} 项)`, 'success'),
+    onSuccess: (r) => {
+      toast(`已清空 ${r.kind} 落盘 (${r.removed} 项)`, 'success')
+      // 刷新状态（tick_count/last_tick_ms 归零）+ 分时预览（曲线清空）
+      // 不能只 invalidate statusKey，分时图用的是 StockIntradayChart 的独立 query
+      // （['free-realtime', 'intraday', symbol, kind]），必须用模糊匹配清掉所有 intraday 缓存
+      qc.invalidateQueries({ queryKey: statusKey() })
+      qc.invalidateQueries({ queryKey: [...QK, 'intraday'], exact: false })
+    },
   })
 
-  function saveMock() {
-    if (!draft) return
-    const symbols = parseSymbols(draft.symbols)
-    if (symbols.length === 0) {
-      toast('symbols 不能为空', 'error')
-      return
-    }
-    const base_prices = parseMap(draft.base_prices)
-    if (base_prices === null) {
-      toast('base_prices 格式错误，应为 SYMBOL=价格', 'error')
-      return
-    }
-    const names = parseNameMap(draft.names)
-    putMock.mutate({
-      symbols,
-      base_prices,
-      names,
-      volatility_pct: parseFloat(draft.volatility_pct),
-      fail_rate: parseFloat(draft.fail_rate),
-      seed: parseInt(draft.seed, 10),
-      acceleration: draft.acceleration,
-    })
+  function changeAcceleration(a: number) {
+    setAcceleration(a)
+    putMock.mutate({ acceleration: a })
+  }
+  function changeStartTime(t: string) {
+    setStartTime(t)
+    putMock.mutate({ start_time: t })
   }
 
   const status: FreeRealtimeTestStatus | undefined = statusQ.data
+  const collectedSymbols = collectQ.data?.symbols ?? []
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-4">
       <header>
         <h1 className="text-xl font-semibold">免费实时行情测试页</h1>
         <p className="text-sm text-muted-foreground">
-          Mock 模式绕过交易时段、平缓随机游走、失败注入、加速倍率；mock 与真实落盘目录隔离。
+          Mock 与真实循环均从「持仓T 已启用 / 自选股已启用 / 超买超卖已启用」三个模块自动拉取标的，无需在此重复配置。
         </p>
       </header>
 
       <section className="rounded border p-4">
-        <h2 className="mb-3 text-lg font-medium">Mock 配置</h2>
-        {!draft ? (
-          <div className="text-muted-foreground">加载中…</div>
+        <h2 className="mb-3 text-lg font-medium">标的来源（共享）</h2>
+        <p className="mb-2 text-sm text-muted-foreground">
+          点击下方任一标的，下方「Mock 落盘」「真实落盘」两个模块将分别用其展示分时数据：
+        </p>
+        {collectedSymbols.length === 0 ? (
+          <p className="text-warn text-sm">
+            当前无已启用标的 — 请在「持仓T / 自选股 / 超买超卖」模块中开启至少一只。
+          </p>
         ) : (
-          <div className="space-y-3">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <label className="block">
-                <span className="text-sm text-muted-foreground">symbols (逗号分隔)</span>
-                <input
-                  className={INPUT_CLS}
-                  value={draft.symbols}
-                  onChange={(e) => setDraft({ ...draft, symbols: e.target.value })}
-                />
-              </label>
-              <label className="block">
-                <span className="text-sm text-muted-foreground">seed</span>
-                <input
-                  className={INPUT_CLS}
-                  type="number"
-                  value={draft.seed}
-                  onChange={(e) => setDraft({ ...draft, seed: e.target.value })}
-                />
-              </label>
-              <label className="block">
-                <span className="text-sm text-muted-foreground">base_prices (SYM=价)</span>
-                <input
-                  className={INPUT_CLS}
-                  value={draft.base_prices}
-                  onChange={(e) => setDraft({ ...draft, base_prices: e.target.value })}
-                />
-              </label>
-              <label className="block">
-                <span className="text-sm text-muted-foreground">names (SYM=名称)</span>
-                <input
-                  className={INPUT_CLS}
-                  value={draft.names}
-                  onChange={(e) => setDraft({ ...draft, names: e.target.value })}
-                />
-              </label>
-              <label className="block">
-                <span className="text-sm text-muted-foreground">volatility_pct (0~0.2)</span>
-                <input
-                  className={INPUT_CLS}
-                  type="number"
-                  step="0.005"
-                  value={draft.volatility_pct}
-                  onChange={(e) => setDraft({ ...draft, volatility_pct: e.target.value })}
-                />
-              </label>
-              <label className="block">
-                <span className="text-sm text-muted-foreground">fail_rate (0~1)</span>
-                <input
-                  className={INPUT_CLS}
-                  type="number"
-                  step="0.05"
-                  value={draft.fail_rate}
-                  onChange={(e) => setDraft({ ...draft, fail_rate: e.target.value })}
-                />
-              </label>
-            </div>
-
-            <div>
-              <span className="text-sm text-muted-foreground">加速倍率</span>
-              <div className="mt-1 flex flex-wrap gap-2">
-                {ACCELERATIONS.map((a) => (
-                  <button
-                    key={a}
-                    type="button"
-                    className={
-                      draft.acceleration === a ? BTN_SM_PRIMARY : BTN_SM_SECONDARY
-                    }
-                    onClick={() => setDraft({ ...draft, acceleration: a })}
-                  >
-                    {a}x
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-              <button className={BTN_PRIMARY} onClick={saveMock} disabled={putMock.isPending}>
-                保存 mock 配置
-              </button>
-              {status?.mock_running ? (
-                <button className={BTN_SECONDARY} onClick={() => stopMock.mutate()}>
-                  <Pause className="size-4" /> 停止 mock
-                </button>
-              ) : (
-                <button
-                  className={BTN_PRIMARY}
-                  onClick={() => startMock.mutate()}
-                  disabled={startMock.isPending}
-                >
-                  <Play className="size-4" /> 启动 mock
-                </button>
-              )}
+          <div className="flex flex-wrap gap-1.5">
+            {collectedSymbols.map((s) => (
               <button
-                className={BTN_SECONDARY}
-                onClick={() => clearMut.mutate('mock')}
+                key={s}
+                type="button"
+                className={
+                  previewSymbol === s
+                    ? 'inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono bg-primary text-primary-foreground'
+                    : 'inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono bg-elevated hover:bg-elevated/80'
+                }
+                onClick={() => setPreviewSymbol(s)}
               >
-                <Trash2 className="size-4" /> 清空 mock 落盘
+                {s}
               </button>
-            </div>
+            ))}
           </div>
         )}
       </section>
 
+      {/* ── Mock 落盘模块 ── */}
       <section className="rounded border p-4">
-        <h2 className="mb-3 text-lg font-medium">真实循环查询</h2>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-lg font-medium">Mock 落盘</h2>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span
+              className={
+                status?.mock_running
+                  ? 'inline-flex items-center gap-1 text-emerald-500'
+                  : 'inline-flex items-center gap-1'
+              }
+            >
+              <span
+                className={
+                  status?.mock_running
+                    ? 'size-1.5 rounded-full bg-emerald-500'
+                    : 'size-1.5 rounded-full bg-muted-foreground/50'
+                }
+              />
+              {status?.mock_running ? '运行中' : '停止'}
+            </span>
+            <span className="font-mono">
+              累计 tick {status?.mock_tick_count ?? 0}
+            </span>
+          </div>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <span className="text-sm text-muted-foreground">加速倍率</span>
+            <div className="mt-1 flex flex-wrap gap-2">
+              {ACCELERATIONS.map((a) => (
+                <button
+                  key={a}
+                  type="button"
+                  className={acceleration === a ? BTN_SM_PRIMARY : BTN_SM_SECONDARY}
+                  onClick={() => changeAcceleration(a)}
+                  disabled={putMock.isPending}
+                >
+                  {a}x
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <span className="text-sm text-muted-foreground">
+              mock 时间起点
+              <span className="ml-1 text-xs text-muted-foreground/70">
+                从该时刻按倍率节奏生成 tick（1x 即真实交易节奏，画完整天约 5.25 小时）
+              </span>
+            </span>
+            <div className="mt-1 flex flex-wrap gap-2">
+              {START_TIMES.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  className={startTime === t ? BTN_SM_PRIMARY : BTN_SM_SECONDARY}
+                  onClick={() => changeStartTime(t)}
+                  disabled={putMock.isPending}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {status?.mock_running ? (
+              <button className={BTN_SECONDARY} onClick={() => stopMock.mutate()}>
+                <Pause className="size-4" /> 停止 mock
+              </button>
+            ) : (
+              <button
+                className={BTN_PRIMARY}
+                onClick={() => startMock.mutate()}
+                disabled={startMock.isPending || collectedSymbols.length === 0}
+                title={collectedSymbols.length === 0 ? '无已启用标的' : '启动 mock 循环'}
+              >
+                <Play className="size-4" /> 启动 mock
+              </button>
+            )}
+            <button
+              className={BTN_SECONDARY}
+              onClick={() => clearMut.mutate('mock')}
+            >
+              <Trash2 className="size-4" /> 清空 mock 落盘
+            </button>
+          </div>
+
+          {previewSymbol && (
+            <div className="pt-2">
+              <StockIntradayChart
+                symbol={previewSymbol.trim().toUpperCase()}
+                date={todayStr}
+                intradayKind="mock"
+                height={480}
+                refetchIntervalMs={status?.mock_running ? 3000 : false}
+              />
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* ── 真实落盘模块 ── */}
+      <section className="rounded border p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-lg font-medium">真实落盘</h2>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span
+              className={
+                status?.real_loop_running
+                  ? 'inline-flex items-center gap-1 text-emerald-500'
+                  : 'inline-flex items-center gap-1'
+              }
+            >
+              <span
+                className={
+                  status?.real_loop_running
+                    ? 'size-1.5 rounded-full bg-emerald-500'
+                    : 'size-1.5 rounded-full bg-muted-foreground/50'
+                }
+              />
+              {status?.real_loop_running ? '运行中' : '停止'}
+            </span>
+            <span className="font-mono">
+              累计 tick {status?.real_tick_count ?? 0}
+            </span>
+          </div>
+        </div>
         <p className="mb-3 text-sm text-muted-foreground">
-          绕过全局开关与交易时段，按配置的间隔轮询勾选源（仅测试用）。
+          绕过全局开关与交易时段，按「A股免费实时行情」配置的间隔轮询勾选源（仅测试用）。
         </p>
         <div className="flex flex-wrap gap-2">
           {status?.real_loop_running ? (
@@ -289,7 +285,12 @@ export function FreeRealtimeTestPage() {
               <Pause className="size-4" /> 停止真实循环
             </button>
           ) : (
-            <button className={BTN_PRIMARY} onClick={() => startReal.mutate()}>
+            <button
+              className={BTN_PRIMARY}
+              onClick={() => startReal.mutate()}
+              disabled={startReal.isPending || collectedSymbols.length === 0}
+              title={collectedSymbols.length === 0 ? '无已启用标的' : '启动真实循环'}
+            >
               <Play className="size-4" /> 启动真实循环
             </button>
           )}
@@ -302,76 +303,27 @@ export function FreeRealtimeTestPage() {
           <button
             className={BTN_GHOST}
             onClick={() => {
-              mockQ.refetch()
               statusQ.refetch()
+              collectQ.refetch()
             }}
           >
             <RefreshCcw className="size-4" />
           </button>
         </div>
-      </section>
 
-      <section className="rounded border p-4">
-        <h2 className="mb-3 text-lg font-medium">运行状态</h2>
-        <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-          <Stat label="mock 循环" value={status?.mock_running ? '运行中' : '停止'} />
-          <Stat
-            label="real 循环"
-            value={status?.real_loop_running ? '运行中' : '停止'}
-          />
-          <Stat label="累计 tick" value={String(status?.tick_count ?? 0)} />
-          <Stat
-            label="最近 tick"
-            value={
-              status?.last_tick_ms
-                ? new Date(status.last_tick_ms).toLocaleTimeString('zh-CN', {
-                    hour12: false,
-                  })
-                : '—'
-            }
-          />
-        </div>
-      </section>
-
-      <section className="rounded border p-4">
-        <h2 className="mb-3 text-lg font-medium">分时数据预览</h2>
-        <div className="mb-3 flex flex-wrap items-end gap-2">
-          <label className="block">
-            <span className="text-sm text-muted-foreground">标的代码</span>
-            <input
-              className={INPUT_CLS}
-              value={previewSymbol}
-              onChange={(e) => setPreviewSymbol(e.target.value)}
-              placeholder="如 600000.SH / 300308.SZ"
+        {previewSymbol && (
+          <div className="pt-4">
+            <StockIntradayChart
+              symbol={previewSymbol.trim().toUpperCase()}
+              date={todayStr}
+              intradayKind="real"
+              height={480}
+              refetchIntervalMs={status?.real_loop_running ? 3000 : false}
             />
-          </label>
-          <div className="flex gap-2">
-            {(['real', 'mock'] as const).map((k) => (
-              <button
-                key={k}
-                type="button"
-                className={previewKind === k ? BTN_SM_PRIMARY : BTN_SM_SECONDARY}
-                onClick={() => setPreviewKind(k)}
-              >
-                {k === 'real' ? '真实落盘' : 'mock 落盘'}
-              </button>
-            ))}
           </div>
-        </div>
-        <IntradayChart
-          symbol={previewSymbol.trim().toUpperCase()}
-          kind={previewKind}
-        />
+        )}
       </section>
     </div>
   )
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded border p-2">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="font-medium">{value}</div>
-    </div>
-  )
-}

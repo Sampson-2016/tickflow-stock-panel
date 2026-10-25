@@ -36,10 +36,17 @@ interface Props {
   onAddToWatchlist?: (groupId: string | null) => void
   onRemoveFromWatchlist?: () => void
   watchlistPending?: boolean
-  /** 分时图自动刷新间隔(ms)。undefined = 不轮询。个股对话框盘中实时刷新时传入。 */
-  refetchIntervalMs?: number
+  /** 分时图自动刷新间隔(ms)。false/undefined = 不轮询。个股对话框盘中实时刷新时传入。 */
+  refetchIntervalMs?: number | false
   /** 只渲染信息条, 隐藏图表 (用于分时 tab 共享信息条) */
   infoBarOnly?: boolean
+  /**
+   * 实时分时数据来源：
+   * - "mock"：免费行情测试页 mock 循环（走 /free-realtime/intraday?kind=mock）
+   * - "real"：真实循环 / 真实盘中（走 /free-realtime/intraday?kind=real）
+   * - undefined：默认走 klineMinute（落库分钟K）原有逻辑
+   */
+  intradayKind?: 'mock' | 'real'
 }
 
 export { getDefaultRange }
@@ -64,6 +71,7 @@ export function StockPanel({
   watchlistPending,
   refetchIntervalMs,
   infoBarOnly = false,
+  intradayKind,
 }: Props) {
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
@@ -189,8 +197,7 @@ export function StockPanel({
               currentPrice={rows[rows.length - 1]?.close}
               priceLines={priceLines}
               refetchIntervalMs={refetchIntervalMs}
-              allowMockFallback
-              showMockBadge
+              intradayKind={intradayKind}
             />
           </div>
         )}

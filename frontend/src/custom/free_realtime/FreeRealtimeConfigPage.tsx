@@ -29,8 +29,6 @@ const statusKey = () => [...QK, 'status'] as const
 interface Draft {
   interval_sec: string
   retention_days: string
-  overbought_pct: string
-  oversold_pct: string
   sources: string[]
   trading_hours_only: boolean
   modules: { position_t: boolean; overbought_oversold: boolean; watchlist: boolean }
@@ -40,8 +38,6 @@ function toDraft(c: FreeRealtimeConfig): Draft {
   return {
     interval_sec: String(c.interval_sec),
     retention_days: String(c.retention_days),
-    overbought_pct: String(c.overbought_pct),
-    oversold_pct: String(c.oversold_pct),
     sources: [...c.sources],
     trading_hours_only: c.trading_hours_only,
     modules: { ...c.modules },
@@ -108,17 +104,10 @@ export function FreeRealtimeConfigPage() {
       toast('至少勾选一个数据源', 'error')
       return
     }
-    const overbought = parseFloat(draft.overbought_pct)
-    const oversold = parseFloat(draft.oversold_pct)
-    if (!(overbought > 0 && overbought <= 50) || !(oversold > 0 && oversold <= 50)) {
-      toast('超买/超卖阈值范围 (0, 50]', 'error')
-      return
-    }
+    // 超买/超卖阈值已迁到「超买超卖」页面按个股配置，本页不再提交
     putCfg.mutate({
       interval_sec: interval,
       retention_days: parseInt(draft.retention_days, 10),
-      overbought_pct: overbought,
-      oversold_pct: oversold,
       sources: draft.sources,
       trading_hours_only: draft.trading_hours_only,
       modules: draft.modules,
@@ -281,32 +270,7 @@ export function FreeRealtimeConfigPage() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <label className="block">
-                <span className="text-sm text-muted-foreground">超买阈值 %</span>
-                <input
-                  className={INPUT_CLS}
-                  type="number"
-                  step="0.5"
-                  value={draft.overbought_pct}
-                  onChange={(e) =>
-                    setDraft({ ...draft, overbought_pct: e.target.value })
-                  }
-                />
-              </label>
-              <label className="block">
-                <span className="text-sm text-muted-foreground">超卖阈值 %</span>
-                <input
-                  className={INPUT_CLS}
-                  type="number"
-                  step="0.5"
-                  value={draft.oversold_pct}
-                  onChange={(e) =>
-                    setDraft({ ...draft, oversold_pct: e.target.value })
-                  }
-                />
-              </label>
-            </div>
+            {/* 超买/超卖阈值已迁到「超买超卖」页面按个股配置，本页不再展示 */}
 
             <div className="flex gap-2">
               <button className={BTN_PRIMARY} onClick={save} disabled={putCfg.isPending}>
@@ -344,10 +308,7 @@ export function FreeRealtimeConfigPage() {
               label="real 落盘文件"
               value={String(status.store_stats?.files?.real ?? 0)}
             />
-            <Stat
-              label="mock 落盘文件"
-              value={String(status.store_stats?.files?.mock ?? 0)}
-            />
+            {/* mock 落盘文件不在此处展示 — 本页面用于正式开发，mock 相关展示由测试页承担 */}
           </div>
         ) : (
           <div className="text-muted-foreground">加载中…</div>

@@ -81,8 +81,18 @@ def evaluate(
     """
     if df.is_empty():
         return []
-    overbought = fr_config.get_overbought_pct()
-    oversold = fr_config.get_oversold_pct()
+    # 全局阈值作为兜底默认；个股 overbought_pct/oversold_pct 优先覆盖
+    default_ob = fr_config.get_overbought_pct()
+    default_os = fr_config.get_oversold_pct()
+    # 个股阈值表：symbol -> (overbought_pct, oversold_pct)
+    per_symbol: dict[str, tuple[float, float]] = {}
+    for it in fr_config.list_overbought_symbols():
+        ob = it.get("overbought_pct")
+        os_ = it.get("oversold_pct")
+        per_symbol[it["symbol"]] = (
+            float(ob) if ob is not None else default_ob,
+            float(os_) if os_ is not None else default_os,
+        )
     disabled = set(fr_config.list_disabled_symbols("overbought_oversold"))
     if not fr_config.get_module_enabled("overbought_oversold"):
         return []
@@ -106,6 +116,8 @@ def evaluate(
             continue
         deviation = (float(last) - ma5) / ma5 * 100.0  # 百分比
         name = (name_map or {}).get(symbol) or str(row.get("name") or symbol)
+        # 个股阈值优先；不在个股清单里的标的用全局默认（兼容持仓T/自选股流入的标的）
+        overbought, oversold = per_symbol.get(symbol, (default_ob, default_os))
         if deviation >= overbought:
             out.append(OverboughtSignal(
                 symbol=symbol, name=name, ts_ms=ts_ms,

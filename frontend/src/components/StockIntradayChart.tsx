@@ -15,89 +15,67 @@ interface Props {
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
   currentPrice?: number
   priceLines?: { value: number; label?: string; color?: string }[]
-  /** 自动刷新间隔(ms)。undefined/0 = 不轮询(默认)。个股对话框盘中实时刷新时传入。 */
-  refetchIntervalMs?: number
+  /** 自动刷新间隔(ms)。undefined/0/false = 不轮询(默认)。个股对话框盘中实时刷新时传入。 */
+  refetchIntervalMs?: number | false
   /**
-   * 当数据源未提供该日分钟数据时，生成 mock 分钟数据填充 UI 用于预览。
-   * 仅用于 UI 验证场景；真实使用不应开启。
+   * 实时分时数据来源：
+   * - "mock" / "real"：走 /free-realtime/intraday 接口，取 RealtimeStore 落盘的 tick，
+   *   同分钟去重聚合，按 refetchIntervalMs 周期性 refetch 增量 tick。
+   *   已发生 tick 不会再变（store 同分钟 keep=last，且过去分钟的不会重写）。
+   * - undefined：默认走 klineMinute 落库分钟K（原有逻辑）。
    */
-  allowMockFallback?: boolean
-  /** mock 模式标记，用于在 UI 上提示"当前为模拟数据" */
-  showMockBadge?: boolean
+  intradayKind?: 'mock' | 'real'
 }
 
-/**
- * 生成 mock 分钟K数据，覆盖完整交易日 9:30-11:30/13:00-15:00。
- * 基于前收做平缓随机游走，volume/amount 给出合理量级。
+/** 把 RealtimeStore 的 tick 行（last_price + ts_ms）按分钟聚合成 MinuteKlineRow。
+ *
+ * - 同 HH:mm 取最后一个 tick → 1 个 row（与后端 store 同分钟去重口径一致）
+ * - 只输出当前已发生的分钟点（不会铺满全日）→ 体现"按频率逐步生成"
+ * - prevClose 缺失时用第一笔 tick 的 last_price 兜底，保证 EChartsIntraday 可渲染
  */
-function generateMockMinuteRows(
-  prevClose: number,
-  date: string,
-  seed: number,
+function aggregateTicksToMinuteRows(
+  ticks: Array<Record<string, unknown>>,
+  prevClose?: number,
 ): MinuteKlineRow[] {
-  // 简易 mulberry32 PRNG，保证同种子可复现
-  let s = seed >>> 0
-  const rand = () => {
-    s |= 0
-    s = (s + 0x6D2B79F5) | 0
-    let t = Math.imul(s ^ (s >>> 15), 1 | s)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
-
-  const rows: MinuteKlineRow[] = []
-  // 与 FULL_DAY_TIMES 一致：9:30-11:30 + 13:00-15:00 共 240 个分钟点
-  const times: string[] = []
-  for (let h = 9, m = 30; h * 60 + m <= 11 * 60 + 30; m++) {
-    if (m === 60) { h++; m = 0 }
-    times.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`)
-  }
-  for (let h = 13, m = 0; h * 60 + m <= 15 * 60; m++) {
-    if (m === 60) { h++; m = 0 }
-    times.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`)
-  }
-
-  let price = prevClose
-    // 单步变动上限为价格的 0.3%
-    const stepMax = prevClose * 0.003
-    // 总波动目标 ±2% 以内
-    for (let i = 0; i < times.length; i++) {
-      const t = times[i]
-      // 开盘前 5 分钟波动更大
-      const volatility = i < 5 ? 1.5 : 1.0
-      const delta = (rand() - 0.5) * 2 * stepMax * volatility
-      let newPrice = price + delta
-      // 全日波动限制在 ±2%
-      if (newPrice > prevClose * 1.02) newPrice = prevClose * 1.02
-      if (newPrice < prevClose * 0.98) newPrice = prevClose * 0.98
-      price = newPrice
-
-      const open = i === 0 ? prevClose : rows[i - 1].close
-      const close = price
-      const high = Math.max(open, close) + Math.abs(delta) * 0.5
-      const low = Math.min(open, close) - Math.abs(delta) * 0.5
-      // 基础成交量 + 随机扰动；开盘/收盘附近略放量
-      const baseVol = 5000 + rand() * 15000
-      const hourMin = i < 5 || i > times.length - 10 ? 2.0 : 1.0
-      const volume = Math.floor(baseVol * hourMin)
-      const amount = Math.floor(volume * 100 * close)
-
-      // datetime 用 UTC 时间（北京时间 - 8h），EChartsIntraday 的 formatMinuteTime
-      // 会做 +8 时区转换，这样最终映射回北京时间的 HH:mm 与 FULL_DAY_TIMES 对齐。
-      const [bh, bm] = t.split(':').map(Number)
-      const utcH = (bh - 8 + 24) % 24
-      const utcHH = String(utcH).padStart(2, '0')
-      const utcMM = String(bm).padStart(2, '0')
-      rows.push({
-        datetime: `${date}T${utcHH}:${utcMM}:00Z`,
-        open: Number(open.toFixed(2)),
-        high: Number(high.toFixed(2)),
-        low: Number(low.toFixed(2)),
-        close: Number(close.toFixed(2)),
-        volume,
-        amount,
-      })
+  if (!ticks.length) return []
+  const byMinute = new Map<string, { price: number; volume: number; ts: number }>()
+  for (const t of ticks) {
+    const tsMs = Number(t.ts_ms ?? 0)
+    if (!tsMs) continue
+    const price = Number(t.last_price ?? 0)
+    if (!price) continue
+    // 后端 ts_ms 是北京时间 tick 时间戳；EChartsIntraday 的 datetime 用 UTC
+    // （组件内部 formatMinuteTime 会 +8 显示）。北京 HH:mm → UTC HH:mm-8。
+    const d = new Date(tsMs)
+    const hh = String(d.getUTCHours()).padStart(2, '0')
+    const mm = String(d.getUTCMinutes()).padStart(2, '0')
+    const key = `${hh}:${mm}`
+    const volume = Number(t.volume ?? 0)
+    if (!byMinute.has(key) || tsMs >= (byMinute.get(key)?.ts ?? 0)) {
+      byMinute.set(key, { price, volume, ts: tsMs })
     }
+  }
+  // 按时间排序，构造 MinuteKlineRow：open/high/low/close 全部 = last_price
+  // （tick 视图只有 last_price 一个标量，K 线四要素不可得；EChartsIntraday 渲染分时线只看 close）
+  const base = prevClose && prevClose > 0 ? prevClose : (ticks[0]?.last_price as number) || 1
+  const rows: MinuteKlineRow[] = []
+  let lastClose = base
+  for (const [key, info] of Array.from(byMinute.entries()).sort()) {
+    const close = info.price
+    const open = lastClose
+    const high = Math.max(open, close)
+    const low = Math.min(open, close)
+    rows.push({
+      datetime: `${key}:00Z`,
+      open: Number(open.toFixed(2)),
+      high: Number(high.toFixed(2)),
+      low: Number(low.toFixed(2)),
+      close: Number(close.toFixed(2)),
+      volume: Math.max(0, Math.floor(info.volume)),
+      amount: 0,
+    })
+    lastClose = close
+  }
   return rows
 }
 
@@ -112,18 +90,36 @@ export function StockIntradayChart({
   currentPrice,
   priceLines,
   refetchIntervalMs,
-  allowMockFallback = false,
-  showMockBadge = false,
+  intradayKind,
 }: Props) {
   const qc = useQueryClient()
   const [minuteDismissed, setMinuteDismissed] = useState(false)
 
+  // intradayKind 提供 → 走 RealtimeStore.tick 路径；否则走 klineMinute（落库分钟K）
+  const useTickPath = !!intradayKind && !!symbol && !!date
+
+  const tickQ = useQuery({
+    queryKey: ['free-realtime', 'intraday', symbol, intradayKind ?? ''] as const,
+    queryFn: () => api.freeRealtimeIntraday(symbol, intradayKind as 'mock' | 'real'),
+    enabled: useTickPath,
+    refetchInterval: refetchIntervalMs,
+  })
+
   const minute = useQuery({
     queryKey: QK.klineMinute(symbol, date ?? ''),
     queryFn: () => api.klineMinute(symbol, date ?? undefined),
-    enabled: !!symbol && !!date,
+    enabled: !!symbol && !!date && !useTickPath,
     refetchInterval: refetchIntervalMs,
   })
+
+  // tick 路径下：把 RealtimeStore tick 聚合成分钟K行（与后端同分钟去重口径一致）。
+  // 注意：useMemo 必须在组件顶层调用，不能放在 `if (useTickPath)` 块内（违反 Hooks 规则），
+  // 否则条件切换时 React hook 调用顺序错乱，会导致 tickRows 不更新或走错分支。
+  const ticks = (tickQ.data?.rows ?? []) as Array<Record<string, unknown>>
+  const tickRows = useMemo(
+    () => aggregateTicksToMinuteRows(ticks, prevClose),
+    [ticks, prevClose],
+  )
 
   const fetchMinute = useMutation({
     mutationFn: () => api.syncMinuteSingle(symbol),
@@ -134,35 +130,6 @@ export function StockIntradayChart({
     },
   })
 
-  const minuteRows: MinuteKlineRow[] = useMemo(() => minute.data?.rows ?? [], [minute.data?.rows])
-  // source=none 表示本地无数据且 TickFlow 也拉不到 (停牌/复牌延迟/非交易日)
-  // 此时不弹"是否获取"询问窗, 只做静态提示, 避免误导用户去拉明知拉不到的数据
-  const sourceIsNone = minute.data?.source === 'none'
-  // 指数分钟K无本地存储且不支持落库获取 (后端 sync_minute_single 显式拒绝), 不显示获取按钮
-  const isIndex = minute.data?.asset_type === 'index'
-
-  // mock 兜底：数据源未提供时用模拟数据填充 UI
-  const mockRows = useMemo<MinuteKlineRow[]>(() => {
-    if (!allowMockFallback) return []
-    if (!date) return []
-    // 关键：等 minute 查询完成（成功或失败都行），避免在加载中触发
-    if (minute.isLoading || minute.isPending) return []
-    if (minuteRows.length > 0) return []
-    // 优先用后端返回的 prev_close；退而求其次用 prop 传入的 prevClose
-    const base = minute.data?.prev_close ?? prevClose
-    if (!base || base <= 0) return []
-    // 用 symbol+date 字符串生成稳定种子
-    const seed = (symbol + date).split('').reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 0)
-    const rows = generateMockMinuteRows(base, date, seed)
-    // eslint-disable-next-line no-console
-    console.log('[StockIntradayChart] mock fallback triggered', {
-      symbol, date, base, rowCount: rows.length, minuteStatus: minute.status,
-    })
-    return rows
-  }, [allowMockFallback, date, minute.isLoading, minute.isPending, minuteRows.length, symbol, minute.data?.prev_close, prevClose, minute.status])
-
-  const showMock = mockRows.length > 0
-
   useEffect(() => {
     setMinuteDismissed(false)
     onPriceHover?.(null)
@@ -170,29 +137,46 @@ export function StockIntradayChart({
 
   if (!symbol || !date) return null
 
-  // mock 兜底渲染：直接走 EChartsIntraday，UI 完全一致
-  if (showMock) {
+  // tick 路径渲染：只展示当前已发生的 tick，曲线随时间推进延伸
+  if (useTickPath) {
+    const isMock = intradayKind === 'mock'
     return (
       <div className={className} style={{ height, flexShrink: 0 }}>
-        {showMockBadge && (
+        {isMock && (
           <div className="mb-1 inline-flex items-center gap-1 rounded bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
             <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-            模拟数据（UI 预览）
+            模拟数据（按频率生成）
           </div>
         )}
-        <EChartsIntraday
-          data={mockRows}
-          height={showMockBadge ? height - 22 : height}
-          prevClose={prevClose}
-          date={date}
-          onPriceHover={onPriceHover}
-          onPriceDoubleClick={onPriceDoubleClick}
-          currentPrice={currentPrice}
-          priceLines={priceLines}
-        />
+        {tickQ.isLoading && <div className="text-xs text-muted py-2">分时加载中…</div>}
+        {!tickQ.isLoading && tickRows.length === 0 && (
+          <div className="flex flex-col items-center justify-center h-full gap-2 text-xs text-muted">
+            <span>暂无 tick 数据</span>
+            <span className="text-[10px] opacity-70">
+              {isMock ? '启动测试页 mock 循环后将按频率生成' : '盘中新加股票无法补抓此前数据'}
+            </span>
+          </div>
+        )}
+        {tickRows.length > 0 && (
+          <EChartsIntraday
+            data={tickRows}
+            height={isMock ? height - 22 : height}
+            prevClose={prevClose}
+            date={date}
+            onPriceHover={onPriceHover}
+            onPriceDoubleClick={onPriceDoubleClick}
+            currentPrice={currentPrice}
+            priceLines={priceLines}
+            tickMode
+          />
+        )}
       </div>
     )
   }
+
+  const minuteRows: MinuteKlineRow[] = minute.data?.rows ?? []
+  const sourceIsNone = minute.data?.source === 'none'
+  const isIndex = minute.data?.asset_type === 'index'
 
   return (
     <div className={className} style={{ height, flexShrink: 0 }}>
@@ -205,10 +189,8 @@ export function StockIntradayChart({
               <span>正在获取分钟K数据…</span>
             </div>
           ) : isIndex ? (
-            // 指数: 分钟K仅支持实时读取, 无落库获取入口
             <div className="flex items-center justify-center h-full text-xs text-muted">指数暂无分钟数据</div>
           ) : sourceIsNone ? (
-            // 数据源确认无此日分钟数据 (停牌/复牌延迟等): 静态提示 + 保留重试
             <div className="flex flex-col items-center justify-center h-full gap-3">
               <div className="text-xs text-muted">该日暂无分钟数据（数据源未提供）</div>
               <button
@@ -223,7 +205,7 @@ export function StockIntradayChart({
               <div className="text-xs text-muted">暂无分钟数据</div>
               <button
                 onClick={() => setMinuteDismissed(false)}
-                className="px-4 py-1.5 rounded-btn bg-accent/90 text-base text-xs font-medium hover:bg-accent transition-colors duration-150"
+                className="px-4 py-1.5 rounded-btn bg-elevated text-secondary text-xs font-medium hover:bg-elevated/80 transition-colors duration-150"
               >
                 获取分钟K
               </button>

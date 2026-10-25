@@ -6,7 +6,7 @@ import {
   AlertTriangle,
   Bell,
   BellRing,
-  CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Pause,
   Play,
@@ -18,14 +18,12 @@ import {
   XCircle,
 } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
-import { fmtPrice, priceColorClass } from '@/lib/format'
+import { StockPanel } from '@/components/StockPanel'
+import { api } from '@/lib/api'
 import { AddPositionDialog } from './AddPositionDialog'
-import { IntradayTChart } from './IntradayTChart'
 import {
-  T_SIGNAL_KIND_LABELS,
   tSignalApi,
   type TSignalConfig,
-  type TSignalItem,
   type TSignalStatus,
 } from './api'
 
@@ -34,8 +32,13 @@ const QK = ['t-signal'] as const
 const statusKey = () => [...QK, 'status'] as const
 const configKey = () => [...QK, 'config'] as const
 const positionsKey = () => [...QK, 'positions'] as const
-const intradayKey = (sym: string) => [...QK, 'intraday', sym] as const
-const positionSignalsKey = (sym: string) => [...QK, 'signals', sym] as const
+
+function relativeAge(tsMs: number): string {
+  if (!tsMs) return '—'
+  const delta = Math.max(0, Date.now() - tsMs)
+  if (delta < 60_000) return `${Math.round(delta / 1000)}s 前`
+  return `${Math.round(delta / 60_000)}m 前`
+}
 
 function formatTime(tsMs: number): string {
   if (!tsMs) return '—'
@@ -43,12 +46,6 @@ function formatTime(tsMs: number): string {
   return d.toLocaleTimeString('zh-CN', {
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
   })
-}
-function relativeAge(tsMs: number): string {
-  if (!tsMs) return '—'
-  const delta = Math.max(0, Date.now() - tsMs)
-  if (delta < 60_000) return `${Math.round(delta / 1000)}s 前`
-  return `${Math.round(delta / 60_000)}m 前`
 }
 
 interface ConfigDraft {
@@ -353,111 +350,6 @@ function PositionRow({
   )
 }
 
-function SignalRow({ item }: { item: TSignalItem }) {
-  const pct = item.change_pct
-  const cls = priceColorClass(pct / 100)
-  return (
-    <div className="px-3 py-2 border-b border-border last:border-b-0">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="text-xs text-muted tabular-nums shrink-0">{formatTime(item.ts_ms)}</span>
-          <span className="text-xs text-muted shrink-0">{T_SIGNAL_KIND_LABELS[item.kind]}</span>
-        </div>
-        <div className="flex items-center gap-3 shrink-0">
-          <span className={`tabular-nums text-sm font-medium ${cls}`}>
-            {pct > 0 ? '+' : ''}{pct.toFixed(2)}%
-          </span>
-          <span className="tabular-nums text-sm text-foreground">{fmtPrice(item.price)}</span>
-        </div>
-      </div>
-      <p className="mt-1 text-xs text-secondary break-all">{item.detail}</p>
-    </div>
-  )
-}
-
-function DetailPanel({
-  symbol,
-  dataStatus,
-  onClose,
-}: {
-  symbol: string
-  dataStatus: 'ok' | 'failed' | 'never'
-  onClose: () => void
-}) {
-  // 复用 Page 顶层 statusQ 的缓存 (同 key 自动共享), 避免重复请求
-  const statusQ = useQuery({ queryKey: statusKey(), queryFn: tSignalApi.status })
-  const isRunning = !!statusQ.data?.running
-
-  const intradayQ = useQuery({
-    queryKey: intradayKey(symbol),
-    queryFn: () => tSignalApi.intraday(symbol),
-    // 后端停止时不会有新点, 拉也拉不到 — 停止轮询避免刷空数据
-    refetchInterval: isRunning ? 5000 : false,
-    enabled: !!symbol,
-  })
-  const signalsQ = useQuery({
-    queryKey: positionSignalsKey(symbol),
-    queryFn: () => tSignalApi.positionSignals(symbol, 200),
-    refetchInterval: isRunning ? 5000 : false,
-    enabled: !!symbol,
-  })
-  // 用最新 signal 的 prev_close 作为昨收基准线
-  const prevClose = useMemo(() => {
-    const items = signalsQ.data?.items ?? []
-    return items.length > 0 ? items[items.length - 1].prev_close : undefined
-  }, [signalsQ.data])
-
-  const items = signalsQ.data?.items ?? []
-  const bars = intradayQ.data?.bars ?? []
-  const lastBar = bars.length > 0 ? bars[bars.length - 1] : undefined
-
-  return (
-    <div className="bg-surface border border-border rounded-card overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-        <div className="flex items-center gap-2 min-w-0">
-          <h3 className="text-sm font-medium text-foreground truncate">{symbol}</h3>
-          {lastBar && (
-            <span className="text-xs text-muted">
-              最新 {lastBar.price.toFixed(2)} · {formatTime(lastBar.ts_ms)}
-            </span>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="h-7 w-7 grid place-items-center rounded-btn text-muted hover:bg-elevated hover:text-foreground"
-        >
-          <XCircle className="h-4 w-4" />
-        </button>
-      </div>
-
-      <div className="p-4">
-        <IntradayTChart bars={bars} signals={items} prevClose={prevClose} height={340} dataStatus={dataStatus} />
-      </div>
-
-      <div className="border-t border-border">
-        <div className="px-4 py-2 flex items-center justify-between">
-          <h4 className="text-xs font-medium text-muted">当日信号 ({items.length})</h4>
-          {items.length > 0 && (
-            <span className="text-[11px] text-muted">点位已在图上标注</span>
-          )}
-        </div>
-        {items.length === 0 ? (
-          <div className="px-4 py-6 text-center text-xs text-muted">
-            暂无信号 — 启用监控后命中规则会自动出现
-          </div>
-        ) : (
-          <div className="max-h-[280px] overflow-auto">
-            {items.map((it, idx) => (
-              <SignalRow key={`${it.ts_ms}-${it.kind}-${idx}`} item={it} />
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
 export function PositionTPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const selectedSymbol = searchParams.get('symbol') || ''
@@ -468,11 +360,23 @@ export function PositionTPage() {
     setSearchParams(next, { replace: true })
   }
   const [addOpen, setAddOpen] = useState(false)
+  // 配置区折叠状态：默认折叠，让列表+详情占主屏
+  const [configCollapsed, setConfigCollapsed] = useState(true)
 
   const statusQ = useQuery({
     queryKey: statusKey(),
     queryFn: tSignalApi.status,
     refetchInterval: (q) => (q.state.data?.running ? 5000 : 15000),
+  })
+  // 免费实时行情测试页状态: mock/真实循环运行时, 持仓T 详情分时图自动持续刷新
+  // 运行时 3s 高频；停止时 15s 低频仅用于感知启动
+  const frTestStatusQ = useQuery({
+    queryKey: ['free-realtime-test', 'status'] as const,
+    queryFn: api.freeRealtimeTestStatus,
+    refetchInterval: (q) => {
+      const d = q.state.data
+      return d && (d.mock_running || d.real_loop_running) ? 3000 : 15000
+    },
   })
   const configQ = useQuery({ queryKey: configKey(), queryFn: tSignalApi.getConfig })
   const positionsQ = useQuery({
@@ -497,6 +401,12 @@ export function PositionTPage() {
   })
 
   const status = statusQ.data
+  const frTestRunning = !!(frTestStatusQ.data?.mock_running || frTestStatusQ.data?.real_loop_running)
+  // 分时图轮询节奏：调度器或测试页循环运行时按配置 interval_sec 轮询（与抓取节奏对齐，避免高频拉前端）
+  // 停止时返回 false：不轮询，无新数据
+  const intradayRefetchMs = (status?.running || frTestRunning)
+    ? Math.max(1000, (status?.interval_sec ?? 3) * 1000)
+    : false
   const config = configQ.data
   const positions = positionsQ.data?.items ?? []
 
@@ -525,18 +435,48 @@ export function PositionTPage() {
           <EmptyState icon={XCircle} title="加载失败" hint={statusQ.error?.message ?? configQ.error?.message ?? '未知错误'} />
         ) : (
           <>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <ControlCard status={status} />
-              <ConfigCard config={config} />
+            {/* 可折叠配置区：折叠后只显示状态条 */}
+            <div className="bg-surface border border-border rounded-card overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setConfigCollapsed((v) => !v)}
+                className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-elevated/50"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <BellRing className="h-4 w-4 text-accent shrink-0" />
+                  <span className="text-sm font-medium text-foreground">
+                    全局轮询 · {status.running ? '运行中' : '已停止'}
+                  </span>
+                  <span className="text-[11px] text-muted shrink-0">
+                    间隔 {status.interval_sec}s · {status.enabled_position_count}/{status.position_count} 启用 · 今日信号 {status.signals_today}
+                  </span>
+                  {status.last_fetch_error && (
+                    <span className="text-[11px] text-warn shrink-0 truncate" title={status.last_fetch_error}>
+                      · 上轮失败
+                    </span>
+                  )}
+                </div>
+                <ChevronDown
+                  className={`h-4 w-4 text-muted shrink-0 transition-transform ${configCollapsed ? '' : 'rotate-180'}`}
+                />
+              </button>
+              {!configCollapsed && (
+                <div className="border-t border-border">
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-0">
+                    <ControlCard status={status} />
+                    <ConfigCard config={config} />
+                  </div>
+                </div>
+              )}
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4">
+            {/* 列表 + 详情：右侧整体复用 StockPanel（日K+分时） */}
+            <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-4 flex-1 min-h-0">
               {/* 持仓 T 列表 */}
-              <div className="bg-surface border border-border rounded-card">
+              <div className="bg-surface border border-border rounded-card flex flex-col overflow-hidden">
                 <div className="flex items-center justify-between px-4 py-2 border-b border-border">
                   <h2 className="text-sm font-medium text-foreground">
                     持仓 T 列表 ({positions.length})
-                    <span className="text-[10px] text-muted ml-1">· 每只独立启停</span>
                   </h2>
                   <button
                     type="button"
@@ -553,7 +493,7 @@ export function PositionTPage() {
                     hint="点击「添加」输入项目 symbol (300308.SZ / 00700.HK), 添加后启用即可开始日内监控。"
                   />
                 ) : (
-                  <div>
+                  <div className="overflow-auto">
                     {positions.map((p) => (
                       <PositionRow
                         key={p.symbol}
@@ -571,18 +511,23 @@ export function PositionTPage() {
                 )}
               </div>
 
-              {/* 单票详情 */}
+              {/* 单票详情：直接复用 StockPanel（日K+分时）。
+                  intradayKind="real" 走 free_realtime 模块的 /api/free-realtime/intraday，
+                  而不是 /api/kline/minute（后者会回退 TickFlow 免费服务，但免费服务不支持分钟K，会失败）。 */}
               {selectedSymbol ? (
-                <DetailPanel
+                <StockPanel
                   symbol={selectedSymbol}
-                  dataStatus={positions.find((p) => p.symbol === selectedSymbol)?.data_status ?? 'never'}
-                  onClose={() => setSelectedSymbol('')}
+                  showIntraday
+                  intradayKind="real"
+                  height={560}
+                  className="min-w-0"
+                  refetchIntervalMs={intradayRefetchMs}
                 />
               ) : (
                 <EmptyState
-                  icon={CheckCircle2}
+                  icon={BellRing}
                   title="点击左侧标的查看详情"
-                  hint="详情页展示当日分时图与历史信号点位 — 刷新页面或重新进入会保留历史。"
+                  hint="选中后右侧会展示日K + 分时图（数据源未提供时用模拟数据预览 UI）。"
                 />
               )}
             </div>

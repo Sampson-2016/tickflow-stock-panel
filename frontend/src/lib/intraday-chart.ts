@@ -38,3 +38,15 @@ function generateFullDayTimes(): string[] {
 }
 
 export const FULL_DAY_TIMES = generateFullDayTimes()
+
+/** 集合竞价时段 9:15-9:29（不含 9:30，9:30 已在 FULL_DAY_TIMES 中） */
+export const CALL_AUCTION_TIMES: string[] = (() => {
+  const times: string[] = []
+  for (let minute = 15; minute <= 29; minute++) {
+    times.push(`09:${String(minute).padStart(2, '0')}`)
+  }
+  return times
+})()
+
+/** 含集合竞价的完整一日时间轴 9:15-15:00 */
+export const FULL_DAY_TIMES_WITH_CALL = [...CALL_AUCTION_TIMES, ...FULL_DAY_TIMES]

@@ -10,7 +10,7 @@ interface Props {
   symbol: string
   days: number
   height?: number
-  refetchIntervalMs?: number
+  refetchIntervalMs?: number | false
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
   priceLines?: { value: number; label?: string; color?: string }[]
 }

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { MinuteKlineRow, PriceLimitInfo } from '@/lib/api'
-import { computeIntradayAverage, formatMinuteTime, FULL_DAY_TIMES } from '@/lib/intraday-chart'
+import { computeIntradayAverage, formatMinuteTime, FULL_DAY_TIMES, FULL_DAY_TIMES_WITH_CALL } from '@/lib/intraday-chart'
 import { useChartTheme, type ChartTheme } from '@/lib/theme'
 
 type YMode = 'adaptive' | 'limit'
@@ -28,6 +28,10 @@ interface Props {
   priceLines?: { value: number; label?: string; color?: string }[]
   showLimitLines?: boolean
   showAvgLine?: boolean
+  /** tick 视图模式：true 时只画 data 中已发生的分钟点，不铺满全日时间轴。
+   *  用于 RealtimeStore tick 路径（mock/实时盘中增量生成），避免 areaStyle 把 9:30 一直拉到 14:57。
+   *  默认 false（历史落库完整分时K，用全日时间轴）。 */
+  tickMode?: boolean
 }
 
 function fmtAmt(v: number): string {
@@ -62,14 +66,262 @@ function getLimitPrices(prevClose: number, priceLimit?: PriceLimitInfo): {
   return { limitUp, limitDown, upPct, downPct }
 }
 
-function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: number[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = []): EChartsOption {
+/**
+ * tick 模式：用 type:'time' 轴 + [timestamp, value] 二元组数据。
+ *
+ * 为什么不能用 category 轴：category 轴把 data 数组的元素数等分到轴宽度，
+ * 单个点会被画成贯穿整条 x 轴的横线（即使 closes 数组其余位置是 null 也一样）。
+ *
+ * time 轴按真实时间戳定位点位置，单点就是单点，新 tick 进来后从左往右逐步增长，
+ * 符合分时图"按频率逐步生成"的需求。
+ */
+function buildTickOption(
+  data: MinuteKlineRow[],
+  prevClose: number | undefined,
+  avgPrices: number[],
+  lineColor: string,
+  areaColor: string,
+  _yMode: YMode,
+  ct: ChartTheme,
+  _priceLimit?: PriceLimitInfo,
+  _showLimitLines = true,
+  showAvgLine = true,
+  priceLines: Props['priceLines'] = [],
+  showCallAuction = true,
+): EChartsOption {
+  // 把 datetime（如 "01:30:00Z" UTC）解析为当天分钟时间戳（毫秒）
+  // datetime 形如 "HH:mm:ssZ"，HH:mm:ss 是 UTC 时分秒（北京 09:15 → UTC 01:15）
+  // xAxis min/max 用 setHours(9,15) 是本地（北京）09:15 = UTC 01:15 = 当日 epoch
+  // 这里必须用 Date.UTC 构造 UTC 当日 h:min:sec 的 epoch，才能与 xAxis 范围对齐
+  const toMs = (datetime: string): number => {
+    const m = datetime.match(/^(\d{2}):(\d{2}):(\d{2})/)
+    if (!m) return 0
+    const h = parseInt(m[1], 10)
+    const min = parseInt(m[2], 10)
+    const sec = parseInt(m[3], 10)
+    const now = new Date()
+    return Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), h, min, sec)
+  }
+
+  const closePairs: [number, number][] = []
+  const avgPairs: [number, number][] = []
+  const volPairs: [number, number][] = []
+  const volNeutral = 'rgba(161,161,170,0.5)'
+  for (let i = 0; i < data.length; i++) {
+    const ms = toMs(data[i].datetime)
+    closePairs.push([ms, data[i].close])
+    avgPairs.push([ms, avgPrices[i]])
+    volPairs.push([ms, data[i].volume])
+  }
+
+  const lastClose = data.length > 0 ? data[data.length - 1].close : null
+  const lineIsUp = lastClose != null && prevClose != null ? lastClose > prevClose : true
+  // A 股：涨红跌绿；这里只用主色（蓝色），着色逻辑由 areaStyle + markLine 完成
+  void lineIsUp // 暂留，后续可按需切色
+
+  const allValues: number[] = []
+  if (prevClose != null) allValues.push(prevClose)
+  for (const row of data) allValues.push(row.close)
+  for (const a of avgPrices) if (a != null) allValues.push(a)
+  const yMin = Math.min(...allValues)
+  const yMax = Math.max(...allValues)
+  const yPad = (yMax - yMin) * 0.1 || 1
+  const yMinAdj = yMin - yPad
+  const yMaxAdj = yMax + yPad
+
+  const areaStyle: any = {
+    color: {
+      type: 'linear',
+      x: 0, y: 0, x2: 0, y2: 1,
+      colorStops: [
+        { offset: 0, color: areaColor },
+        { offset: 1, color: 'rgba(0,0,0,0)' },
+      ],
+    },
+  }
+
+  // 涨跌停 markLine（仅在 limit 模式下显示，与 buildOption 行为一致）
+  const markLineData: any[] = []
+  if (prevClose != null) {
+    markLineData.push({
+      yAxis: prevClose,
+      lineStyle: { color: ct.crosshair, type: 'dashed', width: 1 },
+      label: { show: false },
+      symbol: 'none',
+    })
+  }
+  for (const line of priceLines) {
+    if (!Number.isFinite(line.value) || line.value <= 0) continue
+    markLineData.push({
+      yAxis: line.value,
+      lineStyle: { color: line.color ?? ct.text, type: 'dashed', width: 1, opacity: 0.92 },
+      label: {
+        show: !!line.label,
+        formatter: line.label ?? '',
+        position: 'insideEndTop',
+        color: line.color ?? ct.text,
+        backgroundColor: ct.tooltipBg,
+        borderRadius: 4,
+        padding: [2, 6],
+        fontSize: 10,
+        fontFamily: 'JetBrains Mono, monospace',
+      },
+      symbol: 'none',
+    })
+  }
+
+  const series: any[] = [
+    {
+      name: '价格',
+      type: 'line',
+      data: closePairs,
+      smooth: false,
+      symbol: 'none',
+      cursor: 'crosshair',
+      lineStyle: { width: 1.2, color: lineColor },
+      areaStyle,
+      // tick 模式下不要 connectNulls，让 echarts 在 gap 处断开
+      connectNulls: false,
+      markLine: markLineData.length > 0 ? { symbol: 'none', data: markLineData, animation: false, silent: true } : undefined,
+    },
+  ]
+  if (showAvgLine) {
+    series.push({
+      name: '均价',
+      type: 'line',
+      data: avgPairs,
+      smooth: false,
+      symbol: 'none',
+      cursor: 'crosshair',
+      lineStyle: { width: 1, color: THEME.avgLine },
+      connectNulls: false,
+    })
+  }
+  series.push({
+    name: '成交量',
+    type: 'bar',
+    xAxisIndex: 1,
+    yAxisIndex: 1,
+    data: volPairs.map(([t, v], i) => ({
+      value: [t, v],
+      itemStyle: {
+        color: data[i].close > data[i].open ? THEME.volUp : data[i].close < data[i].open ? THEME.volDown : volNeutral,
+      },
+    })),
+  })
+
+  return {
+    backgroundColor: 'transparent',
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
+    },
+    axisPointer: { link: [{ xAxisIndex: 'all' }] },
+    grid: [
+      { left: 60, right: 55, top: 24, bottom: '34%' },
+      { left: 60, right: 55, top: '69%', bottom: 20 },
+    ],
+    xAxis: [
+      {
+        type: 'time',
+        // x 轴范围：showCallAuction 时从 9:15 开始（含集合竞价），否则从 9:30 开始
+        min: (() => {
+          const d = new Date()
+          d.setHours(showCallAuction ? 9 : 9, showCallAuction ? 15 : 30, 0, 0)
+          return d.getTime()
+        })(),
+        max: (() => { const d = new Date(); d.setHours(15, 0, 0, 0); return d.getTime() })(),
+        axisPointer: {
+          show: true,
+          lineStyle: { color: ct.crosshair, type: 'dashed', width: 1 },
+          label: { show: true, backgroundColor: ct.tooltipBg, borderColor: ct.tooltipBorder, borderWidth: 1, padding: [2, 4], color: ct.tooltipText, fontSize: 10, fontFamily: 'JetBrains Mono, monospace' },
+        },
+        axisLine: { show: false },
+        axisLabel: {
+          color: ct.text,
+          fontSize: 10,
+          fontFamily: 'JetBrains Mono, monospace',
+          formatter: (params: any) => {
+            // 防御 NaN/undefined：空数据或 hover 在数据外时 params.value 可能为 NaN
+            // new Date(NaN) 是 Invalid Date，getHours() 返回 NaN，会渲染成 "NaN:NaN"
+            const v = params?.value
+            if (typeof v !== 'number' || !Number.isFinite(v)) return ''
+            const d = new Date(v)
+            const h = String(d.getHours()).padStart(2, '0')
+            const m = String(d.getMinutes()).padStart(2, '0')
+            if (h === 'NaN' || m === 'NaN') return ''
+            return `${h}:${m}`
+          },
+        },
+        axisTick: { show: false },
+        splitLine: { show: true, lineStyle: { color: ct.grid } },
+      },
+      {
+        type: 'time',
+        gridIndex: 1,
+        min: (() => {
+          const d = new Date()
+          d.setHours(showCallAuction ? 9 : 9, showCallAuction ? 15 : 30, 0, 0)
+          return d.getTime()
+        })(),
+        max: (() => { const d = new Date(); d.setHours(15, 0, 0, 0); return d.getTime() })(),
+        axisLine: { show: false },
+        axisLabel: { show: false },
+        axisTick: { show: false },
+        splitLine: { show: false },
+      },
+    ],
+    yAxis: [
+      {
+        type: 'value',
+        min: yMinAdj,
+        max: yMaxAdj,
+        splitArea: { show: false },
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: { lineStyle: { color: ct.grid } },
+        axisPointer: {
+          label: {
+            formatter: (params: any) => {
+              const v = params?.value
+              return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(2) : ''
+            },
+          },
+        },
+        axisLabel: { color: ct.text, fontSize: 10, fontFamily: 'JetBrains Mono, monospace' },
+      },
+      {
+        type: 'value',
+        gridIndex: 1,
+        splitNumber: 2,
+        splitArea: { show: false },
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: { lineStyle: { color: ct.grid } },
+        axisLabel: { color: ct.text, fontSize: 10, fontFamily: 'JetBrains Mono, monospace' },
+      },
+    ],
+    dataZoom: [
+      { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
+      { type: 'inside', yAxisIndex: [0], start: 0, end: 100, zoomOnMouseWheel: false, moveOnMouseWheel: false },
+    ],
+    series,
+  }
+}
+
+function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: number[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = [], times: string[] = FULL_DAY_TIMES, tickMode: boolean = false): EChartsOption {
+  if (tickMode) {
+    // 从 times 推断 showCallAuction：times[0] === "09:15" 表示含集合竞价段
+    const showCallAuction = times.length > 0 && times[0] === '09:15'
+    return buildTickOption(data, prevClose, avgPrices, lineColor, areaColor, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, showCallAuction)
+  }
   // 将数据映射到全天时间轴上的正确位置
-  const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
-  const closes = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
-  const highs = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
-  const lows = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
-  const avgData = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
-  const volumes = new Array(FULL_DAY_TIMES.length).fill(null) as (any | null)[]
+  const timeIndexMap = new Map(times.map((t, i) => [t, i]))
+  const closes = new Array(times.length).fill(null) as (number | null)[]
+  const highs = new Array(times.length).fill(null) as (number | null)[]
+  const lows = new Array(times.length).fill(null) as (number | null)[]
+  const avgData = new Array(times.length).fill(null) as (number | null)[]
+  const volumes = new Array(times.length).fill(null) as (any | null)[]
 
   const volNeutral = 'rgba(161,161,170,0.5)'
   for (let i = 0; i < data.length; i++) {
@@ -191,15 +443,13 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
     }
   }
 
-  // x 轴标签: 9:30, 10:30, 11:30/13:00, 14:00, 15:00
-  // 11:30(idx 120) 和 13:00(idx 121) 相邻会重叠, 合并为一个标签
-  const xAxisLabelMap: Record<number, string> = {
-    0: '9:30',
-    60: '10:30',
-    120: '11:30/13:00',
-    181: '14:00',
-    241: '15:00',
-  }
+  // x 轴标签：根据是否含竞价段计算索引
+  // 默认（不含竞价）：9:30(idx 0), 10:30(60), 11:30/13:00(120), 14:00(181), 15:00(241)
+  // 含竞价：9:15(idx 0), 9:30(15), 10:30(75), 11:30/13:00(135), 14:00(196), 15:00(256)
+  const hasCall = times.length > FULL_DAY_TIMES.length
+  const xAxisLabelMap: Record<number, string> = hasCall
+    ? { 0: '9:15', 15: '9:30', 75: '10:30', 135: '11:30/13:00', 196: '14:00', 256: '15:00' }
+    : { 0: '9:30', 60: '10:30', 120: '11:30/13:00', 181: '14:00', 241: '15:00' }
   const xAxisLabelFormatter = (_value: string, idx: number) => {
     return xAxisLabelMap[idx] ?? ''
   }
@@ -239,7 +489,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
     xAxis: [
       {
         type: 'category',
-        data: FULL_DAY_TIMES,
+        data: times,
         boundaryGap: false,
         axisPointer: {
           show: true,
@@ -275,7 +525,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       {
         type: 'category',
         gridIndex: 1,
-        data: FULL_DAY_TIMES,
+        data: times,
         boundaryGap: false,
         axisLine: { show: false },
         axisLabel: { show: false },
@@ -360,8 +610,12 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         symbol: 'none',
         cursor: 'crosshair',
         lineStyle: { width: 1.2, color: lineColor },
-        areaStyle,
-        connectNulls: true,
+        // tick 模式：禁用 areaStyle，避免单点被 echarts 拉满到 x 轴末端
+        // （category 轴 + areaStyle 会把 1 个点的面积填充到整条 x 轴宽度）
+        areaStyle: tickMode ? undefined : areaStyle,
+        // 关闭 connectNulls：tick 视图下只画已发生分钟点，
+        // 不用直线把 null 间隙连接起来（否则只有 1 个点时会从 9:30 拉直线到 14:57）
+        connectNulls: false,
         markLine: markLineData.length > 0 ? { symbol: 'none', data: markLineData, animation: false, silent: true } : undefined,
       },
       ...(showAvgLine ? [{
@@ -372,7 +626,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         symbol: 'none',
         cursor: 'crosshair',
         lineStyle: { width: 1, color: THEME.avgLine },
-        connectNulls: true,
+        connectNulls: false,
       }] : []),
       {
         name: '成交量',
@@ -398,6 +652,7 @@ export function EChartsIntraday({
   priceLines,
   showLimitLines = true,
   showAvgLine = true,
+  tickMode = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
@@ -417,8 +672,14 @@ export function EChartsIntraday({
 
   const [infoIdx, setInfoIdx] = useState(data.length - 1)
   const [yMode, setYMode] = useState<YMode>('adaptive')
+  // 是否显示集合竞价段（9:15-9:29），默认开启，与测试页 mock 起点 09:15 对齐
+  const [showCallAuction, setShowCallAuction] = useState(true)
   const ct = useChartTheme()
   const avgPrices = useMemo(() => computeIntradayAverage(data), [data])
+  // times = 全日时间轴（240 个分钟点）。tick 模式下也用全日时间轴，
+  // 让 closes 数组中"未发生分钟点"保持 null，配合 connectNulls:false + areaStyle:undefined，
+  // echarts 只画已发生的点，新数据从左往右逐步增长。
+  const times = showCallAuction ? FULL_DAY_TIMES_WITH_CALL : FULL_DAY_TIMES
 
   // 分时线颜色：基于最新价 vs 昨收
   const lastClose = data.length > 0 ? data[data.length - 1].close : null
@@ -493,8 +754,8 @@ export function EChartsIntraday({
     }
 
     if (data.length > 0) {
-      // 构建全日索引 → 数据索引 的映射
-      const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
+      // 构建全日索引 → 数据索引 的映射（基于当前 times 数组）
+      const timeIndexMap = new Map(times.map((t, i) => [t, i]))
       const mapping = new Map<number, number>()
       for (let i = 0; i < data.length; i++) {
         const timeKey = formatMinuteTime(data[i].datetime)
@@ -505,11 +766,11 @@ export function EChartsIntraday({
       }
       fullDayToDataIdx.current = mapping
 
-      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines), true)
+      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, times, tickMode), true)
     } else {
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines])
+  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, times])
 
   useEffect(() => {
     return () => {
@@ -536,8 +797,19 @@ export function EChartsIntraday({
 
   return (
     <div className="w-full">
-      {/* 按钮行: 切换式按钮组, 居右 */}
-      {showLimitLines && <div className="flex items-center justify-end px-1 pb-0.5">
+      {/* 按钮行: 左侧「显示竞价」切换，右侧 Y 轴模式切换 */}
+      {showLimitLines && <div className="flex items-center justify-between px-1 pb-0.5">
+        <button
+          onClick={() => setShowCallAuction(v => !v)}
+          className={`px-2.5 py-0.5 text-[10px] font-mono cursor-pointer transition-colors rounded border ${
+            showCallAuction
+              ? 'bg-accent/20 text-accent border-accent/40'
+              : 'text-muted hover:text-secondary bg-elevated border-border/40'
+          }`}
+          title="集合竞价段 9:15-9:29，默认隐藏"
+        >
+          {showCallAuction ? '竞价 ✓' : '竞价'}
+        </button>
         <div className="inline-flex items-center rounded bg-elevated overflow-hidden">
           <button
             onClick={() => setYMode('adaptive')}

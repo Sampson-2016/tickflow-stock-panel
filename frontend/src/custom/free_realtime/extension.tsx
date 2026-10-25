@@ -1,7 +1,8 @@
-import { Gauge, FlaskConical } from 'lucide-react'
+import { Gauge, FlaskConical, TrendingUp } from 'lucide-react'
 import type { FrontendExtension } from '@/extensions/types'
 import { FreeRealtimeConfigPage } from './FreeRealtimeConfigPage'
 import { FreeRealtimeTestPage } from './FreeRealtimeTestPage'
+import { OverboughtOversoldPage } from './OverboughtOversoldPage'
 
 const extension: FrontendExtension = {
   id: 'free_realtime.realtime',
@@ -17,6 +18,11 @@ const extension: FrontendExtension = {
       path: '/free-realtime-test',
       component: FreeRealtimeTestPage,
     },
+    {
+      id: 'free-realtime-overbought-oversold',
+      path: '/free-realtime-overbought-oversold',
+      component: OverboughtOversoldPage,
+    },
   ],
   navigation: [
     {
@@ -25,6 +31,13 @@ const extension: FrontendExtension = {
       label: 'A股免费实时行情',
       icon: Gauge,
       order: 470,
+    },
+    {
+      id: 'free-realtime-overbought-nav',
+      routeId: 'free-realtime-overbought-oversold',
+      label: '超买超卖',
+      icon: TrendingUp,
+      order: 475,
     },
     {
       id: 'free-realtime-test-nav',

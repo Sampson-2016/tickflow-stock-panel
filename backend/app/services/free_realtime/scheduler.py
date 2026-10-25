@@ -14,13 +14,13 @@ import random
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from typing import ClassVar
 
 from app.config import settings
 from app.data_providers.free_realtime.registry import get_provider
 from app.data_providers.free_realtime.schemas import empty_realtime_df
-from app.markets import CN_TZ, is_trading_now
+from app.markets import CN_TZ
 from app.services.free_realtime import config as fr_config
 from app.services.free_realtime.store import RealtimeStore
 
@@ -28,6 +28,25 @@ logger = logging.getLogger(__name__)
 
 # 单标的最多 50 只（避免外部接口被批量拉死）
 _MAX_BATCH_SYMBOLS = 50
+
+# A 股行情抓取时段（北京时间）
+# - 9:15-9:30 早盘集合竞价（虚拟参考价会变化，需抓）
+# - 9:30-11:30 上午连续竞价
+# - 13:00-15:00 下午连续竞价 + 14:57-15:00 收盘集合竞价
+# 3 点后竞价价格不再变化，停止抓取节省配额。
+_CAPTURE_SESSIONS = (
+    (dt_time(9, 15), dt_time(11, 30)),
+    (dt_time(13, 0), dt_time(15, 0)),
+)
+
+
+def is_capture_now(dt: datetime | None = None) -> bool:
+    """当前是否处于 A 股免费行情抓取时段（9:15-11:30 + 13:00-15:00，含集合竞价）。"""
+    t = (dt or datetime.now(CN_TZ)).time()
+    for start, end in _CAPTURE_SESSIONS:
+        if start <= t < end:
+            return True
+    return False
 
 
 class CircuitBreaker:
@@ -222,8 +241,8 @@ class FreeRealtimeScheduler:
         # 全局开关；用户随时关掉就立即生效
         if not fr_config.get_global_enabled():
             return
-        # 交易时段过滤（默认 True）
-        if fr_config.get_trading_hours_only() and not is_trading_now("cn"):
+        # 抓取时段过滤（默认 True）：A 股 9:15-11:30 + 13:00-15:00（含集合竞价）
+        if fr_config.get_trading_hours_only() and not is_capture_now():
             return
         # 选源：交替使用未熔断的源
         sources = fr_config.get_sources()

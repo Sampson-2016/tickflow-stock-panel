@@ -3242,6 +3242,79 @@ export const api = {
       rows: Array<Record<string, number | string>>
     }>(`/api/free-realtime/intraday/${encodeURIComponent(symbol)}?kind=${kind}&days=${days}`),
 
+  // ===== 免费实时行情: 超买超卖模块 =====
+  freeRealtimeOverboughtSymbols: () =>
+    request<{
+      items: Array<{
+        symbol: string
+        name: string
+        enabled: boolean
+        overbought_pct: number | null
+        oversold_pct: number | null
+      }>
+      count: number
+    }>('/api/free-realtime/overbought-oversold/symbols'),
+  freeRealtimeOverboughtSymbolAdd: (symbol: string, name?: string) =>
+    request<{
+      items: Array<{
+        symbol: string
+        name: string
+        enabled: boolean
+        overbought_pct: number | null
+        oversold_pct: number | null
+      }>
+      count: number
+    }>('/api/free-realtime/overbought-oversold/symbols', {
+      method: 'POST',
+      body: JSON.stringify({ symbol, name }),
+    }),
+  freeRealtimeOverboughtSymbolDelete: (symbol: string) =>
+    request<{
+      items: Array<{
+        symbol: string
+        name: string
+        enabled: boolean
+        overbought_pct: number | null
+        oversold_pct: number | null
+      }>
+      count: number
+    }>(`/api/free-realtime/overbought-oversold/symbols/${encodeURIComponent(symbol)}`, {
+      method: 'DELETE',
+    }),
+  freeRealtimeOverboughtSymbolToggle: (symbol: string, enabled: boolean) =>
+    request<{ symbol: string; enabled: boolean }>(
+      `/api/free-realtime/overbought-oversold/symbols/${encodeURIComponent(symbol)}`,
+      { method: 'PUT', body: JSON.stringify({ enabled }) },
+    ),
+  freeRealtimeOverboughtSymbolSetThresholds: (
+    symbol: string,
+    overboughtPct: number | null,
+    oversoldPct: number | null,
+  ) =>
+    request<{ symbol: string }>(
+      `/api/free-realtime/overbought-oversold/symbols/${encodeURIComponent(symbol)}/thresholds`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ overbought_pct: overboughtPct, oversold_pct: oversoldPct }),
+      },
+    ),
+  freeRealtimeOverboughtSignals: () =>
+    request<{
+      items: Array<{
+        symbol: string
+        name: string
+        ts_ms: number
+        last_price: number
+        ma5: number
+        deviation_pct: number
+        direction: 'overbought' | 'oversold'
+        threshold_pct: number
+      }>
+      count: number
+      evaluated: number
+      error?: string
+    }>('/api/free-realtime/overbought-oversold/signals'),
+
   // ===== 免费实时行情: 测试页端点 (绕过交易时段/全局开关) =====
   freeRealtimeTestMockConfig: () =>
     request<{
@@ -3277,11 +3350,17 @@ export const api = {
       real_loop_running: boolean
       last_tick_ms: number
       tick_count: number
+      mock_tick_count: number
+      real_tick_count: number
     }>('/api/free-realtime/test/status'),
   freeRealtimeTestClear: (kind: 'real' | 'mock') =>
     request<{ ok: boolean; removed: number; kind: string }>(
       `/api/free-realtime/test/clear?kind=${kind}`,
       { method: 'POST' },
+    ),
+  freeRealtimeTestCollectSymbols: () =>
+    request<{ symbols: string[]; running_mock: boolean; running_real: boolean }>(
+      '/api/free-realtime/test/collect-symbols',
     ),
 }
 

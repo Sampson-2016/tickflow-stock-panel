@@ -79,6 +79,27 @@ class TestMockConfig:
         assert resp.status_code == 200
         assert resp.json()["config"]["fail_rate"] == 1.0
 
+    def test_start_time_default_is_0915(self, client):
+        """默认 start_time 为 09:15（含集合竞价）。"""
+        resp = client.get("/api/free-realtime/test/mock/config")
+        assert resp.status_code == 200
+        assert resp.json()["config"].get("start_time") == "09:15"
+
+    def test_put_start_time_updates(self, client):
+        resp = client.put(
+            "/api/free-realtime/test/mock/config",
+            json={"start_time": "10:30"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["config"]["start_time"] == "10:30"
+
+    def test_invalid_start_time_rejected(self, client):
+        resp = client.put(
+            "/api/free-realtime/test/mock/config",
+            json={"start_time": "08:00"},
+        )
+        assert resp.status_code == 400
+
 
 class TestStartStop:
     def test_start_stop_mock(self, client):

@@ -20,6 +20,13 @@ export const freeRealtimeApi = {
   stop: api.freeRealtimeStop,
   prune: api.freeRealtimePrune,
   intraday: api.freeRealtimeIntraday,
+  // 超买超卖模块
+  overboughtSymbols: api.freeRealtimeOverboughtSymbols,
+  overboughtSymbolAdd: api.freeRealtimeOverboughtSymbolAdd,
+  overboughtSymbolDelete: api.freeRealtimeOverboughtSymbolDelete,
+  overboughtSymbolToggle: api.freeRealtimeOverboughtSymbolToggle,
+  overboughtSymbolSetThresholds: api.freeRealtimeOverboughtSymbolSetThresholds,
+  overboughtSignals: api.freeRealtimeOverboughtSignals,
   // 测试页
   testMockConfig: api.freeRealtimeTestMockConfig,
   testMockPutConfig: api.freeRealtimeTestMockPutConfig as (
@@ -31,11 +38,14 @@ export const freeRealtimeApi = {
   testRealStop: api.freeRealtimeTestRealStop,
   testStatus: api.freeRealtimeTestStatus,
   testClear: api.freeRealtimeTestClear,
+  testCollectSymbols: api.freeRealtimeTestCollectSymbols,
 }
 
 export type FreeRealtimeConfig = Awaited<ReturnType<typeof api.freeRealtimeGetConfig>>
 export type FreeRealtimeStatus = Awaited<ReturnType<typeof api.freeRealtimeStatus>>
 export type FreeRealtimeTestStatus = Awaited<ReturnType<typeof api.freeRealtimeTestStatus>>
+export type FreeRealtimeOverboughtSymbol = Awaited<ReturnType<typeof api.freeRealtimeOverboughtSymbols>>['items'][number]
+export type FreeRealtimeOverboughtSignal = Awaited<ReturnType<typeof api.freeRealtimeOverboughtSignals>>['items'][number]
 
 export const SOURCE_LABELS: Record<string, string> = {
   sina: '新浪财经',

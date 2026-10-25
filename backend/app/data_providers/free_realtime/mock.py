@@ -6,13 +6,14 @@
   - 概率性失败注入（fail_rate）
   - 连续失败注入（inject_fail）
   - 确定性 seed
+  - 虚拟时钟（start_time）：从历史起点回放已发生 tick
 
 PR1 提供基础骨架，完整测试页逻辑（加速倍率/交易时段绕过）在 PR4 完善。
 """
 from __future__ import annotations
 
 import random
-from datetime import datetime
+from datetime import datetime, time as dt_time, timedelta
 
 import polars as pl
 
@@ -28,6 +29,17 @@ from app.markets import CN_TZ
 _DEFAULT_BASE_PRICE = 10.0
 
 
+def _parse_start_time(raw: str | None) -> dt_time | None:
+    """解析 "HH:MM" 格式的虚拟时钟起点，失败返回 None。"""
+    if not raw:
+        return None
+    try:
+        h, m = str(raw).strip().split(":")
+        return dt_time(int(h), int(m))
+    except Exception:
+        return None
+
+
 class MockProvider(FreeRealtimeProvider):
     """Mock 实时报价 provider。
 
@@ -41,6 +53,7 @@ class MockProvider(FreeRealtimeProvider):
             "seed": 42,                          # 确定性
             "interval_seconds": 1.0,             # 基础间隔（PR4 加速用）
             "acceleration": 1,                   # 1/3/10/30/60/120
+            "start_time": "09:15",              # 虚拟时钟起点（可选）
         }
     """
 
@@ -51,6 +64,9 @@ class MockProvider(FreeRealtimeProvider):
         self._current_prices: dict[str, float] = {}
         # 连续失败注入：剩余次数
         self._fail_remaining: int = 0
+        # 虚拟时钟：若 start_time 配置则每次 get_realtime 推进一个 base interval
+        self._mock_clock: datetime | None = None
+        self._init_mock_clock()
 
     def set_config(self, config: dict) -> None:
         """整体替换配置并重置状态。"""
@@ -58,6 +74,77 @@ class MockProvider(FreeRealtimeProvider):
         self._rng = random.Random(self._config.get("seed"))
         self._current_prices.clear()
         self._fail_remaining = 0
+        self._init_mock_clock()
+
+    def set_tick_interval(self, seconds: float) -> None:
+        """仅更新 tick 间隔（虚拟时钟推进步长），不重置价格序列与 RNG。
+
+        用于测试页 mock 循环跟随用户在「A股免费实时行情」配置面板修改的
+        刷新间隔（interval_sec）——避免 set_config 重置 _current_prices
+        导致价格序列断裂。
+        """
+        if seconds <= 0:
+            return
+        self._config["interval_seconds"] = float(seconds)
+
+    def _init_mock_clock(self) -> None:
+        """根据 start_time 配置初始化虚拟时钟（今日 + start_time）。"""
+        t = _parse_start_time(self._config.get("start_time"))
+        if t is None:
+            self._mock_clock = None
+            return
+        now = datetime.now(CN_TZ)
+        self._mock_clock = datetime(
+            now.year, now.month, now.day, t.hour, t.minute, tzinfo=CN_TZ
+        )
+
+    def mock_clock(self) -> datetime | None:
+        """当前虚拟时钟；None 表示使用真实时间。"""
+        return self._mock_clock
+
+    def set_mock_clock(self, dt: datetime) -> None:
+        """外部强制设置虚拟时钟（用于回放控制）。"""
+        self._mock_clock = dt
+
+    def step_mock_clock(self, delta_seconds: float) -> None:
+        """推进虚拟时钟；仅当 start_time 已配置时生效。"""
+        if self._mock_clock is not None:
+            self._mock_clock = self._mock_clock + timedelta(seconds=delta_seconds)
+
+    def backfill(self, symbols: list[str], from_dt: datetime, to_dt: datetime,
+                 interval_sec: float) -> pl.DataFrame:
+        """快速回放 [from_dt, to_dt) 段所有 tick，按 interval_sec 间隔，单次返回。
+
+        用于 mock 启动时一次性补齐 9:15 → start_time 段的历史数据，
+        之后 _mock_loop 进入 1-tick-per-interval 的流式生成（"两个接口"中的另一个）。
+
+        约定（与 _mock_loop 流式路径保持一致，保证时间轴连续无重叠）:
+          - 第一个 tick 时间戳 = from_dt（如 09:15:00）
+          - 最后一个 tick 时间戳 = to_dt - interval_sec（如 09:59:54，interval=6s, to=10:00）
+          - 返回时 mock_clock 停在最后一个 tick 的时间戳，留给 _mock_loop 流式循环接管：
+            下一次 get_realtime 推进到 to_dt，生成 tick 在 to_dt（如 10:00:00），无缝衔接
+
+        返回单 DataFrame，包含所有 symbols 在所有时间点的 tick（已合并）。
+        """
+        if not symbols or interval_sec <= 0 or to_dt <= from_dt:
+            return empty_realtime_df()
+
+        # 让第一个 tick 落在 from_dt：get_realtime 内部先 advance +interval 再生成 tick
+        # 所以 clock 设为 from_dt - interval，第一次调用后 advance 到 from_dt
+        self._mock_clock = from_dt - timedelta(seconds=interval_sec)
+        self._config["interval_seconds"] = float(interval_sec)
+
+        rows: list[pl.DataFrame] = []
+        # 循环：检查"下一次推进后是否会越界"，避免生成多余的 tick（也避免浪费 RNG step）
+        while self._mock_clock is not None and \
+                self._mock_clock + timedelta(seconds=interval_sec) < to_dt:
+            df = self.get_realtime(symbols)
+            if not df.is_empty():
+                rows.append(df)
+
+        if not rows:
+            return empty_realtime_df()
+        return pl.concat(rows)
 
     def inject_fail(self, consecutive: int = 1) -> None:
         """注入连续失败次数。接下来 consecutive 次返回空 DataFrame。"""
@@ -89,7 +176,12 @@ class MockProvider(FreeRealtimeProvider):
         if fail_rate > 0 and self._rng.random() < fail_rate:
             return empty_realtime_df()
 
+        # 虚拟时钟优先：每次调用前推进一个 base interval（仅回放/循环节奏一致）
         now = datetime.now(CN_TZ)
+        if self._mock_clock is not None:
+            base = float(self._config.get("interval_seconds", 1.0))
+            self._mock_clock = self._mock_clock + timedelta(seconds=base)
+            now = self._mock_clock
         ts_ms = int(now.timestamp() * 1000)
         trade_date = now.date()
         base_prices = self._config.get("base_prices", {})

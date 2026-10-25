@@ -147,6 +147,124 @@ def list_disabled_symbols(module: str) -> list[str]:
     return out
 
 
+# ── 超买超卖模块标的清单 ──────────────────────────────────
+# 持仓T 标的来自持仓数据，自选股标的来自 watchlist 模块；
+# 超买超卖标的没有上游来源，必须独立持久化一份用户配置的清单。
+_OB_KEY = "free_realtime_overbought_symbols"
+
+
+def list_overbought_symbols() -> list[dict]:
+    """返回超买超卖模块的全部标的清单（顺序保留）。
+
+    每项形如 {
+        "symbol": "600000.SH",
+        "name": "浦发银行",
+        "enabled": True,
+        "overbought_pct": 5.0 | None,   # 个股超买阈值；None 表示跟随全局默认
+        "oversold_pct": 5.0 | None,     # 个股超卖阈值；None 表示跟随全局默认
+    }。
+    """
+    raw = _load().get(_OB_KEY)
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        sym = str(item.get("symbol", "")).strip().upper()
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        # 个股阈值：可选；缺省 None 让评估器回落到全局默认
+        ob = item.get("overbought_pct")
+        os_ = item.get("oversold_pct")
+        out.append({
+            "symbol": sym,
+            "name": str(item.get("name") or sym),
+            "enabled": bool(item.get("enabled", True)),
+            "overbought_pct": float(ob) if isinstance(ob, (int, float)) else None,
+            "oversold_pct": float(os_) if isinstance(os_, (int, float)) else None,
+        })
+    return out
+
+
+def add_overbought_symbol(symbol: str, name: str | None = None) -> list[dict]:
+    """新增一个标的到超买超卖清单；symbol 已存在时仅更新 name，不重复加入。
+
+    返回更新后的清单。
+    """
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        raise ValueError("symbol required")
+    items = list_overbought_symbols()
+    for it in items:
+        if it["symbol"] == sym:
+            if name and it.get("name") != name:
+                it["name"] = str(name)
+            _persist_overbought(items)
+            return items
+    items.append({"symbol": sym, "name": str(name or sym), "enabled": True})
+    _persist_overbought(items)
+    return items
+
+
+def remove_overbought_symbol(symbol: str) -> list[dict]:
+    sym = str(symbol or "").strip().upper()
+    items = [it for it in list_overbought_symbols() if it["symbol"] != sym]
+    _persist_overbought(items)
+    return items
+
+
+def set_overbought_symbol_enabled(symbol: str, enabled: bool) -> list[dict]:
+    """切换单个超买超卖标的 enabled 状态；不存在则忽略。"""
+    items = list_overbought_symbols()
+    found = False
+    for it in items:
+        if it["symbol"] == symbol.strip().upper():
+            it["enabled"] = bool(enabled)
+            found = True
+            break
+    if found:
+        _persist_overbought(items)
+    return items
+
+
+def set_overbought_symbol_thresholds(
+    symbol: str,
+    overbought_pct: float | None,
+    oversold_pct: float | None,
+) -> list[dict]:
+    """设置单个超买超卖标的的阈值；None 表示清除个股覆盖，回落到全局默认。
+
+    阈值范围 (0, 50]；不存在 symbol 时忽略。
+    """
+    for v in (overbought_pct, oversold_pct):
+        if v is not None and not (0 < float(v) <= 50):
+            raise ValueError("threshold pct must be in (0, 50]")
+    sym = symbol.strip().upper()
+    items = list_overbought_symbols()
+    found = False
+    for it in items:
+        if it["symbol"] == sym:
+            it["overbought_pct"] = float(overbought_pct) if overbought_pct is not None else None
+            it["oversold_pct"] = float(oversold_pct) if oversold_pct is not None else None
+            found = True
+            break
+    if found:
+        _persist_overbought(items)
+    return items
+
+
+def _persist_overbought(items: list[dict]) -> None:
+    preferences.save({_OB_KEY: items})
+
+
+def list_overbought_enabled_symbols() -> list[str]:
+    """超买超卖模块中 enabled=True 的 symbol 列表（供调度器 collector 调用）。"""
+    return [it["symbol"] for it in list_overbought_symbols() if it.get("enabled", True)]
+
+
 # ── 超买超卖阈值 ────────────────────────────────────────────
 def get_overbought_pct() -> float:
     """超买：向上偏离 5 日线的百分比阈值（默认 5.0）。"""

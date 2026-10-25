@@ -127,6 +127,141 @@ def get_intraday(symbol: str, kind: str = "real", days: int = 1) -> dict:
     }
 
 
+# ── 超买超卖模块端点 ───────────────────────────────────────
+# 超买超卖模块维护自己的独立标的清单（不依赖持仓T/自选股）；
+# 标的 CRUD 在此路由组下，个股 enabled/disabled 控制是否参与评估
+# 阈值/模块开关复用 PUT /api/free-realtime/config (overbought_pct / oversold_pct / modules)
+
+
+@router.get("/overbought-oversold/symbols")
+def get_overbought_oversold_symbols() -> dict:
+    """返回超买超卖模块独立的标的清单（不与持仓T/自选股合并）。
+
+    每项形如 {"symbol", "name", "enabled"}；前端用于列表渲染 + 增删开关。
+    """
+    items = fr_config.list_overbought_symbols()
+    return {"items": items, "count": len(items)}
+
+
+class OverboughtSymbolIn(BaseModel):
+    symbol: str
+    name: str | None = None
+
+
+class OverboughtSymbolToggleIn(BaseModel):
+    enabled: bool
+
+
+class OverboughtSymbolThresholdsIn(BaseModel):
+    # None 表示清除个股覆盖，回落到全局默认
+    overbought_pct: float | None = None
+    oversold_pct: float | None = None
+
+
+@router.post("/overbought-oversold/symbols")
+def post_overbought_oversold_symbol(payload: OverboughtSymbolIn) -> dict:
+    """添加一个标的到超买超卖清单。
+
+    已存在时仅更新 name，不重复加入；symbol 自动归一化（strip+upper）。
+    """
+    sym = (payload.symbol or "").strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol required")
+    items = fr_config.add_overbought_symbol(sym, payload.name)
+    return {"items": items, "count": len(items)}
+
+
+@router.delete("/overbought-oversold/symbols/{symbol}")
+def delete_overbought_oversold_symbol(symbol: str) -> dict:
+    """从超买超卖清单中删除一个标的。"""
+    sym = symbol.strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol required")
+    items = fr_config.remove_overbought_symbol(sym)
+    return {"items": items, "count": len(items)}
+
+
+@router.put("/overbought-oversold/symbols/{symbol}")
+def put_overbought_oversold_symbol(symbol: str, payload: OverboughtSymbolToggleIn) -> dict:
+    """切换个股在超买超卖模块的 enabled 状态。"""
+    sym = symbol.strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol required")
+    items = fr_config.set_overbought_symbol_enabled(sym, bool(payload.enabled))
+    return {"symbol": sym, "enabled": bool(payload.enabled), "items": items}
+
+
+@router.put("/overbought-oversold/symbols/{symbol}/thresholds")
+def put_overbought_oversold_symbol_thresholds(
+    symbol: str, payload: OverboughtSymbolThresholdsIn
+) -> dict:
+    """设置个股超买/超卖阈值；任一为 null 表示该方向回落到全局默认。"""
+    sym = symbol.strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol required")
+    try:
+        items = fr_config.set_overbought_symbol_thresholds(
+            sym, payload.overbought_pct, payload.oversold_pct
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"symbol": sym, "items": items}
+
+
+@router.get("/overbought-oversold/signals")
+def get_overbought_oversold_signals() -> dict:
+    """在线评估当前已启用标的的超买超卖信号。
+
+    评估流程：
+      1. 通过 fr_config.list_overbought_enabled_symbols() 拉取本模块 enabled 标的
+      2. 从 RealtimeStore.list_today 取每个标的的最新 tick（real 优先，mock 兜底）
+      3. 调用 overbought_oversold.evaluate，从 KlineRepository 取最近 4 日 raw_close
+      4. 返回命中信号列表
+
+    Returns:
+        {"items": [Signal...], "count": N, "evaluated": N}
+    """
+    import polars as pl
+    from app.data_providers.free_realtime.schemas import FREE_REALTIME_SCHEMA
+
+    scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
+    repo = _get_repo_from_app()
+    if repo is None:
+        return {"items": [], "count": 0, "evaluated": 0, "error": "repository not ready"}
+
+    # 1. 拉取超买超卖模块自己的 enabled 标的
+    symbols = fr_config.list_overbought_enabled_symbols()
+    if not symbols:
+        return {"items": [], "count": 0, "evaluated": 0}
+
+    # 2. 取每个标的的最新 tick（real 优先，mock 兜底）
+    latest_rows: list[dict] = []
+    for sym in symbols:
+        for kind in ("real", "mock"):
+            df = scheduler.store().list_today(sym, kind=kind)
+            if not df.is_empty():
+                latest_rows.append(df.tail(1).row(0, named=True))
+                break
+    if not latest_rows:
+        return {"items": [], "count": 0, "evaluated": 0}
+
+    tick_df = pl.DataFrame(latest_rows, schema=FREE_REALTIME_SCHEMA)
+
+    # 3. 在线评估
+    from app.services.free_realtime import overbought_oversold
+    try:
+        sigs = overbought_oversold.evaluate(tick_df, repo)
+    except Exception as e:
+        logger.warning("overbought-oversold evaluate failed: %s", e)
+        return {"items": [], "count": 0, "evaluated": len(latest_rows), "error": str(e)}
+
+    return {
+        "items": [overbought_oversold.to_dict(s) for s in sigs],
+        "count": len(sigs),
+        "evaluated": len(latest_rows),
+    }
+
+
 # ── 测试页端点 ─────────────────────────────────────────────
 class MockConfigIn(BaseModel):
     symbols: list[str] | None = None
@@ -136,6 +271,7 @@ class MockConfigIn(BaseModel):
     fail_rate: float | None = None
     seed: int | None = None
     acceleration: int | None = None
+    start_time: str | None = None  # 虚拟时钟起点 "HH:MM"（默认 "09:15"）
 
 
 _test_state: dict[str, Any] = {
@@ -150,15 +286,43 @@ _test_state: dict[str, Any] = {
         "seed": 42,
         "interval_seconds": 1.0,
         "acceleration": 1,
+        "start_time": "09:15",
     },
     "mock_thread": None,
     "real_thread": None,
     "lock": threading.Lock(),
     "last_tick_ms": 0.0,
+    # mock 与 real 各自独立计 tick，方便前端按落盘模块分别展示
     "tick_count": 0,
+    "mock_tick_count": 0,
+    "real_tick_count": 0,
 }
 # 加速倍率白名单
 _ACCELERATIONS = (1, 3, 10, 30, 60, 120)
+# mock 虚拟时钟起点白名单（"09:15" 早盘集合竞价起 / "10:30" 等其他交易时段点）
+_ALLOWED_START_TIMES = ("09:15", "09:30", "10:30", "11:00", "13:00", "14:00")
+
+
+def _latest_ts_ms(df: Any) -> float:
+    """从 df 中取最新 tick 的 ts_ms。
+
+    - 优先用 df 自带的 ts_ms（mock 虚拟时钟 / real provider 已 stamp 过的轮询时间）
+    - 若 df 为空或 ts_ms 列异常，回退到 time.time() * 1000
+    """
+    try:
+        if df.is_empty():
+            return time.time() * 1000
+        series = df["ts_ms"]
+        if series.len() == 0:
+            return time.time() * 1000
+        # 取最后一行（最新 tick）；polars Series 末项即最新
+        last_val = series.to_list()[-1]
+        if last_val is None or int(last_val) <= 0:
+            return time.time() * 1000
+        return float(last_val)
+    except Exception:
+        return time.time() * 1000
+
 
 
 @test_router.get("/mock/config")
@@ -170,6 +334,19 @@ def get_mock_config() -> dict:
         "running": _test_state["mock_running"],
         "accelerations": list(_ACCELERATIONS),
     }
+
+
+@test_router.get("/collect-symbols")
+def get_collect_symbols() -> dict:
+    """返回三个模块当前已启用的标的列表（mock 与真实循环共用）。"""
+    scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
+    symbols: list[str] = []
+    if scheduler._collector is not None:
+        try:
+            symbols = scheduler._collector.collect()
+        except Exception as e:
+            logger.warning("collect-symbols failed: %s", e)
+    return {"symbols": symbols, "running_mock": _test_state["mock_running"], "running_real": _test_state["real_loop_running"]}
 
 
 @test_router.put("/mock/config")
@@ -195,6 +372,14 @@ def put_mock_config(payload: MockConfigIn) -> dict:
                     detail=f"acceleration must be in {list(_ACCELERATIONS)}",
                 )
             cfg["acceleration"] = int(payload.acceleration)
+        if payload.start_time is not None:
+            raw = str(payload.start_time).strip()
+            if raw not in _ALLOWED_START_TIMES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"start_time must be in {list(_ALLOWED_START_TIMES)}",
+                )
+            cfg["start_time"] = raw
         _test_state["config"] = cfg
         # 重置 MockProvider 实例状态
         from app.data_providers.free_realtime.registry import get_provider
@@ -216,6 +401,7 @@ def start_mock_loop() -> dict:
         provider.set_config(_test_state["config"])
         _test_state["mock_running"] = True
         _test_state["tick_count"] = 0
+        _test_state["mock_tick_count"] = 0
         t = threading.Thread(target=_mock_loop, daemon=True, name="free-realtime-mock")
         _test_state["mock_thread"] = t
     t.start()
@@ -242,6 +428,7 @@ def start_real_loop() -> dict:
             return {"ok": True, "already_running": True}
         _test_state["real_loop_running"] = True
         _test_state["tick_count"] = 0
+        _test_state["real_tick_count"] = 0
         t = threading.Thread(target=_real_loop, daemon=True, name="free-realtime-test")
         _test_state["real_thread"] = t
     t.start()
@@ -268,42 +455,150 @@ def test_status() -> dict:
             "real_loop_running": _test_state["real_loop_running"],
             "last_tick_ms": _test_state["last_tick_ms"],
             "tick_count": _test_state["tick_count"],
+            "mock_tick_count": _test_state["mock_tick_count"],
+            "real_tick_count": _test_state["real_tick_count"],
         }
 
 
 @test_router.post("/clear")
 def clear_storage(kind: str = "real") -> dict:
-    """一键清空指定 kind 的所有落盘 + 内存窗口。"""
+    """一键清空指定 kind 的所有落盘 + 内存窗口 + 测试状态计数。"""
     if kind not in ("real", "mock"):
         raise HTTPException(status_code=400, detail="kind must be real/mock")
     scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
     removed = scheduler.store().clear_kind(kind)
+    # 同步清空测试页状态：对应 kind 的 tick_count 归零 + last_tick_ms 归零
+    # 否则前端 status query 仍返回旧值，用户看到「tick 数量不为 0」
+    with _test_state["lock"]:
+        if kind == "mock":
+            _test_state["mock_tick_count"] = 0
+        else:
+            _test_state["real_tick_count"] = 0
+        # mock 和 real 共用 last_tick_ms 字段；清空任一 kind 都归零更直观
+        _test_state["last_tick_ms"] = 0.0
     return {"ok": True, "removed": removed, "kind": kind}
 
 
 # ── 后台循环（mock） ──────────────────────────────────────
 def _mock_loop() -> None:
+    """Mock 循环：按 acceleration 节奏生成 tick。
+
+    两阶段（"两个接口"）:
+      1. 启动时一次性 backfill 9:15 → start_time 段（如果 start_time > 09:15），
+         一批推送进 store——让分时图打开就有 9:15-10:00 的完整曲线
+      2. 之后按 interval_sec / acceleration 节奏生成 1 个 tick/循环，逐步推进
+         ——让分时图随时间向右延伸
+
+    时间轴约定（与 MockProvider.backfill 一致）:
+      - backfill 末尾 mock_clock 停在 start_time - interval_sec
+      - 流式第一次 get_realtime 推进到 start_time，tick 在 start_time
+      - 无重叠、无间隙
+    """
+    from datetime import datetime, time as dt_time, timedelta
+
     from app.data_providers.free_realtime.registry import get_provider
+    from app.markets import CN_TZ
 
     provider = get_provider("mock")
     scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
+
+    # ── 计算回放范围与起点 ─
+    # start_time 仅作为 mock 时钟起点。如果 start_time > 09:15（如 10:00），
+    # 先 backfill 9:15 → start_time 段（一气呵成、不睡眠），再进入 1-tick-per-interval 流式。
+    interval_sec = max(1, int(fr_config.get_interval_sec()))
+    try:
+        with _test_state["lock"]:
+            cfg = dict(_test_state["config"])
+        start_raw = cfg.get("start_time")
+        now_real = datetime.now(CN_TZ)
+        today_0915 = datetime(
+            now_real.year, now_real.month, now_real.day, 9, 15, tzinfo=CN_TZ
+        )
+        if start_raw:
+            h, m = str(start_raw).strip().split(":")
+            t_start = dt_time(int(h), int(m))
+            mock_start = datetime(
+                now_real.year, now_real.month, now_real.day,
+                t_start.hour, t_start.minute, tzinfo=CN_TZ,
+            )
+        else:
+            mock_start = today_0915
+    except Exception as e:
+        logger.warning("mock clock init failed: %s", e)
+        # 兜底：直接进入流式（不 backfill），clock 由 provider 默认值决定
+        mock_start = today_0915
+
+    # ── 接口 1：backfill 9:15 → start_time（一气呵成） ─
+    # 仅当 start_time > 09:15 时回放，避免起点本身在 09:15 的无意义回放。
+    # backfill 后 mock_clock 停在 mock_start - interval_sec，留给流式接管。
+    try:
+        if mock_start > today_0915:
+            try:
+                symbols_bf = scheduler._collector.collect() if scheduler._collector else []
+            except Exception as e:
+                logger.warning("mock backfill collector failed: %s", e)
+                symbols_bf = []
+            if symbols_bf:
+                bf_df = provider.backfill(
+                    symbols_bf, today_0915, mock_start, float(interval_sec)
+                )
+                if not bf_df.is_empty():
+                    scheduler.store().append(bf_df, kind="mock")
+                    with _test_state["lock"]:
+                        # tick_count 按"每 symbol 一行"计数（与流式循环口径一致）
+                        added = bf_df.height // max(1, len(symbols_bf))
+                        _test_state["tick_count"] += added
+                        _test_state["mock_tick_count"] += added
+                        _test_state["last_tick_ms"] = _latest_ts_ms(bf_df)
+                    logger.info(
+                        "mock backfill: %d ticks from %s to %s",
+                        bf_df.height // max(1, len(symbols_bf)),
+                        today_0915.strftime("%H:%M:%S"),
+                        mock_start.strftime("%H:%M:%S"),
+                    )
+        else:
+            # start_time <= 09:15：不需要 backfill，把 clock 设到 mock_start - interval
+            # 让流式第一次 tick 落在 mock_start（与 backfill 后的衔接约定一致）
+            provider.set_mock_clock(mock_start - timedelta(seconds=interval_sec))
+    except Exception as e:
+        logger.warning("mock backfill failed: %s", e)
+        provider.set_mock_clock(mock_start - timedelta(seconds=interval_sec))
+
+    # ── 接口 2：1-tick-per-interval 流式生成 ─
     while True:
         with _test_state["lock"]:
             if not _test_state["mock_running"]:
                 break
             cfg = dict(_test_state["config"])
-        symbols = cfg.get("symbols") or []
+        # tick 间隔跟随用户在「A股免费实时行情」配置面板设置的刷新间隔
+        # （interval_sec，范围 6..60 秒），与真实循环查询同口径。
+        # acceleration 仍是测试页加速倍率：真实睡眠 = interval_sec / acceleration。
+        # 虚拟时钟推进步长 = interval_sec（每个 tick 代表 interval_sec 秒虚拟时间）。
+        interval_sec = max(1, int(fr_config.get_interval_sec()))
+        provider.set_tick_interval(float(interval_sec))
+        # Mock 标的来自三个模块 collector（持仓T / 自选股 / 超买超卖）
+        # 这样测试页与真实循环共享同一份标的列表，避免重复配置
+        try:
+            symbols = scheduler._collector.collect() if scheduler._collector else []
+        except Exception as e:
+            logger.warning("mock loop collector failed: %s", e)
+            symbols = []
         if symbols:
             df = provider.get_realtime(symbols)
             if not df.is_empty():
                 scheduler.store().append(df, kind="mock")
+                # 用最新 tick 的 ts_ms（虚拟时钟推进后的时间戳）作为「最近 tick」，
+                # 而不是 time.time()（真实挂钟时间戳）。这样前端显示就能反映 mock
+                # 虚拟时钟推进到的时间（如 9:15、9:16…），与起点 start_time 一致。
+                last_ms = _latest_ts_ms(df)
                 with _test_state["lock"]:
-                    _test_state["last_tick_ms"] = time.time() * 1000
+                    _test_state["last_tick_ms"] = last_ms
                     _test_state["tick_count"] += 1
-        # 真实间隔 = base interval / acceleration
-        base = float(cfg.get("interval_seconds", 1.0))
+                    _test_state["mock_tick_count"] += 1
+        # 真实睡眠间隔 = interval_sec / acceleration
+        # interval_sec 与真实循环查询同口径（用户在「A股免费实时行情」配置面板设置）
         accel = max(1, int(cfg.get("acceleration", 1)))
-        sleep_sec = max(0.05, base / accel)
+        sleep_sec = max(0.05, interval_sec / accel)
         slept = 0.0
         while slept < sleep_sec:
             with _test_state["lock"]:
@@ -336,9 +631,14 @@ def _real_loop() -> None:
                 df = provider.get_realtime(symbols)
                 if not df.is_empty():
                     scheduler.store().append(df, kind="real")
+                    # 与 mock loop 一致：用最新 tick 自带的 ts_ms 作为「最近 tick」，
+                    # 而不是 time.time()。base provider 已用 _stamp_poll_time 覆盖
+                    # ts_ms 为本地轮询时间，与原行为等价但更精确。
+                    last_ms = _latest_ts_ms(df)
                     with _test_state["lock"]:
-                        _test_state["last_tick_ms"] = time.time() * 1000
+                        _test_state["last_tick_ms"] = last_ms
                         _test_state["tick_count"] += 1
+                        _test_state["real_tick_count"] += 1
         except Exception as e:
             logger.warning("test real loop tick failed: %s", e)
         interval = fr_config.get_interval_sec()
@@ -397,31 +697,10 @@ def startup(context: ExtensionContext) -> None:
 
                 fr_scheduler.FreeRealtimeScheduler.register_module_callback(_overbought_callback)
 
-                # 超买超卖 collector：与持仓T 标的列表共用即可
-                # 用户在超买超卖模块中通过个股 enabled 控制参与
+                # 超买超卖 collector：只返回本模块 enabled 标的清单。
+                # 调度器内部 collector 会自动把 持仓T + 自选股 + 超买超卖 三者去重合并。
                 def _overbought_collector() -> list[str]:
-                    # 复用持仓T + 自选股 enabled 列表（避免引入新存储）
-                    syms: list[str] = []
-                    try:
-                        from app.custom.easyquotation_t_signal import POLLER
-                        syms.extend(POLLER.positions().list_enabled_symbols())
-                    except Exception:
-                        pass
-                    try:
-                        from app.services import watchlist
-                        rows = watchlist.list_symbols()
-                        syms.extend(str(r.get("symbol") or "") for r in rows if r.get("symbol"))
-                    except Exception:
-                        pass
-                    # 去重
-                    seen: set[str] = set()
-                    out: list[str] = []
-                    for s in syms:
-                        s = str(s or "").strip().upper()
-                        if s and s not in seen:
-                            seen.add(s)
-                            out.append(s)
-                    return out
+                    return fr_config.list_overbought_enabled_symbols()
 
                 scheduler.register_collector(_overbought_collector)
                 logger.info("overbought_oversold attached to free_realtime")
@@ -434,16 +713,20 @@ def startup(context: ExtensionContext) -> None:
 
 
 def _get_repo_from_app():
-    """从 FastAPI app.state 取 KlineRepository（仅在请求上下文外调用）。"""
-    from app.extensions.loader import current_extension_context
+    """从 FastAPI app.state 取 KlineRepository（仅在请求上下文外调用）。
 
-    ctx = current_extension_context()
-    if ctx and getattr(ctx, "repository", None):
-        return ctx.repository
-    # fallback: 直接从 main 模块全局拿（启动后已就绪）
-    from app.main import app
+    优先从 main 模块全局 app.state 取（启动后已就绪）；
+    若该路径失败（如测试环境未初始化 app.state），返回 None 由调用方兜底。
+    """
+    try:
+        from app.main import app
 
-    return getattr(app.state, "repo", None)
+        repo = getattr(app.state, "repo", None)
+        if repo is not None:
+            return repo
+    except Exception as e:
+        logger.debug("get repo from app.state failed: %s", e)
+    return None
 
 
 def _push_overbought_signals(sigs) -> None:

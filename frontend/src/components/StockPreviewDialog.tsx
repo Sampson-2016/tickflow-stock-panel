@@ -162,14 +162,37 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
   }, [symbol])
 
   // 分时图实时轮询: 复用自选列表的「分时刷新开关 + 间隔」偏好。
-  // 仅实时行情运行 且 用户开启分时刷新时才轮询; 否则 undefined (定格)。
+  // 仅实时行情运行 且 用户开启分时刷新时才轮询; 否则 false (定格)。
+  // 另外: 免费实时行情测试页的 mock/真实循环运行时也强制轮询,
+  // 便于用户在测试页打开数据源后, 直接看到分时图持续生成。
   const { data: prefs } = usePreferences()
   const { data: quoteStatus } = useQuoteStatus()
+  const { data: frStatus } = useQuery({
+    queryKey: ['free-realtime', 'status'] as const,
+    queryFn: api.freeRealtimeStatus,
+    refetchInterval: (q) => {
+      const d = q.state.data
+      return d && (d.running || false) ? 5000 : 15000
+    },
+  })
+  const { data: frTestStatus } = useQuery({
+    queryKey: ['free-realtime-test', 'status'] as const,
+    queryFn: api.freeRealtimeTestStatus,
+    refetchInterval: (q) => {
+      const d = q.state.data
+      return d && (d.mock_running || d.real_loop_running) ? 3000 : 15000
+    },
+  })
   const realtimeRunning = quoteStatus?.running ?? false
   const intradayRefreshOn = prefs?.minute_intraday_refresh ?? false
-  const intradayRefetchMs = (intradayRefreshOn && realtimeRunning)
-    ? (prefs?.minute_intraday_refresh_interval ?? 6) * 1000
-    : undefined
+  const frTestRunning = !!(frTestStatus?.mock_running || frTestStatus?.real_loop_running)
+  // 分时图轮询节奏：fr 调度器或测试页循环运行时按 interval_sec 轮询；
+  // 否则回落到自选列表分时刷新偏好；都不满足则 false（不轮询）
+  const intradayRefetchMs = (frStatus?.running || frTestRunning)
+    ? Math.max(1000, (frStatus?.interval_sec ?? 3) * 1000)
+    : (intradayRefreshOn && realtimeRunning)
+      ? (prefs?.minute_intraday_refresh_interval ?? 6) * 1000
+      : false
 
   const handleRefresh = () => {
     if (!symbol) return
@@ -476,6 +499,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   symbol={symbol}
                   height={420}
                   showIntraday
+                  intradayKind="real"
                   dateRange={dateRange}
                   priceLines={monitorPriceLines}
                   onPriceDoubleClick={openPriceAlert}
