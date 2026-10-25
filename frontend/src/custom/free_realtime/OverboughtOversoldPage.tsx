@@ -45,6 +45,8 @@ export function OverboughtOversoldPage() {
   const [configCollapsed, setConfigCollapsed] = useState(true)
   const [filter, setFilter] = useState<'all' | 'signals' | 'enabled'>('all')
   const [addOpen, setAddOpen] = useState(false)
+  // 数据源视图：real 真实行情 / mock 测试页虚拟行情（mock 运行中才可切）
+  const [dataSource, setDataSource] = useState<'real' | 'mock'>('real')
 
   // 调度器状态（用于分时图持续刷新）
   const statusQ = useQuery({
@@ -70,10 +72,10 @@ export function OverboughtOversoldPage() {
     refetchInterval: 10000,
   })
 
-  // 在线评估信号
+  // 在线评估信号（跟随数据源视图：mock 视图优先取 mock tick 评估）
   const signalsQ = useQuery({
-    queryKey: signalsKey(),
-    queryFn: freeRealtimeApi.overboughtSignals,
+    queryKey: [...signalsKey(), dataSource],
+    queryFn: () => freeRealtimeApi.overboughtSignals(dataSource),
     refetchInterval: (q) => {
       const frRunning = !!q.state.data?.evaluated && q.state.data?.evaluated > 0
       return frRunning ? 5000 : 15000
@@ -105,6 +107,7 @@ export function OverboughtOversoldPage() {
   })
 
   const status = statusQ.data
+  const mockRunning = !!frTestStatusQ.data?.mock_running
   const frTestRunning = !!(frTestStatusQ.data?.mock_running || frTestStatusQ.data?.real_loop_running)
   // 分时图轮询节奏：调度器或测试页循环运行时按配置 interval_sec 轮询（与抓取节奏对齐，避免高频拉前端）
   // 停止时返回 false：不轮询，无新数据
@@ -149,6 +152,24 @@ export function OverboughtOversoldPage() {
           <h1 className="text-base font-semibold text-foreground">超买超卖</h1>
         </div>
         <div className="flex items-center gap-2">
+          {/* 数据源切换：mock 运行中才可切到 mock 视图 */}
+          <div className="flex rounded-btn border border-border overflow-hidden text-[11px]" title="数据源视图">
+            {(['real', 'mock'] as const).map((k) => (
+              <button
+                key={k}
+                type="button"
+                disabled={k === 'mock' && !mockRunning}
+                className={`px-2 h-7 ${
+                  dataSource === k
+                    ? 'bg-accent text-white'
+                    : 'bg-elevated text-secondary hover:text-foreground disabled:opacity-40'
+                }`}
+                onClick={() => setDataSource(k)}
+              >
+                {k === 'real' ? '真实' : 'Mock'}
+              </button>
+            ))}
+          </div>
           <button
             className={BTN_GHOST}
             onClick={() => {
@@ -290,7 +311,7 @@ export function OverboughtOversoldPage() {
                   <StockPanel
                     symbol={selectedSymbol}
                     showIntraday
-                    intradayKind="real"
+                    intradayKind={dataSource}
                     height={520}
                     className="min-w-0"
                     refetchIntervalMs={intradayRefetchMs}

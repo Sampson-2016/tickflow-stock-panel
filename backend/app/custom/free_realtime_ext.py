@@ -209,8 +209,10 @@ def put_overbought_oversold_symbol_thresholds(
 
 
 @router.get("/overbought-oversold/signals")
-def get_overbought_oversold_signals() -> dict:
+def get_overbought_oversold_signals(source: str = "real") -> dict:
     """在线评估当前已启用标的的超买超卖信号。
+
+    source: "real"（默认，real tick 优先 mock 兜底）或 "mock"（mock tick 优先）。
 
     评估流程：
       1. 通过 fr_config.list_overbought_enabled_symbols() 拉取本模块 enabled 标的
@@ -234,10 +236,11 @@ def get_overbought_oversold_signals() -> dict:
     if not symbols:
         return {"items": [], "count": 0, "evaluated": 0}
 
-    # 2. 取每个标的的最新 tick（real 优先，mock 兜底）
+    # 2. 取每个标的的最新 tick（source=mock 时 mock 优先，real 时 real 优先，互为兜底）
     latest_rows: list[dict] = []
+    kinds = ("mock", "real") if source == "mock" else ("real", "mock")
     for sym in symbols:
-        for kind in ("real", "mock"):
+        for kind in kinds:
             df = scheduler.store().list_today(sym, kind=kind)
             if not df.is_empty():
                 latest_rows.append(df.tail(1).row(0, named=True))
@@ -646,6 +649,48 @@ def _mock_loop() -> None:
         provider.set_mock_clock(mock_start - timedelta(seconds=interval_sec))
 
     # ── 接口 2：1-tick-per-interval 流式生成 ─
+    # 已 backfill 过的标的集合：mock 运行中新加入的标的（三个模块开关/清单变化）
+    # 需要增量补抓 9:15 → 当前虚拟时钟 段，否则新标的分时图前段为空。
+    backfilled: set[str] = set()
+    # 记录启动 backfill 覆盖过的标的（含空清单情形下跳过的）
+    try:
+        backfilled.update(symbols_bf)
+    except NameError:
+        pass
+
+    def _backfill_new_symbols(new_syms: list[str], until_dt) -> None:
+        """对 mock 运行中新加入的标的增量回填 9:15 → until_dt 段。
+
+        backfill 会重置共享虚拟时钟，这里先保存后恢复，保证主循环时间轴无缝。
+        """
+        saved_clock = provider.mock_clock()
+        try:
+            bf_df = provider.backfill(
+                new_syms, today_0915, until_dt, float(interval_sec)
+            )
+            if not bf_df.is_empty():
+                scheduler.store().append(bf_df, kind="mock")
+                try:
+                    import polars as pl
+                    scheduler.dispatch_mock(
+                        bf_df.filter(
+                            pl.col("ts_ms") == bf_df["ts_ms"].max()
+                        )
+                    )
+                except Exception:
+                    pass
+                logger.info(
+                    "mock incremental backfill: %d symbols × %d ticks to %s",
+                    len(new_syms),
+                    bf_df.height // max(1, len(new_syms)),
+                    until_dt.strftime("%H:%M:%S"),
+                )
+        except Exception as e:
+            logger.warning("mock incremental backfill failed: %s", e)
+        finally:
+            if saved_clock is not None:
+                provider.set_mock_clock(saved_clock)
+
     while True:
         with _test_state["lock"]:
             if not _test_state["mock_running"]:
@@ -664,10 +709,25 @@ def _mock_loop() -> None:
         except Exception as e:
             logger.warning("mock loop collector failed: %s", e)
             symbols = []
+        # 增量回填：mock 运行中新加入的标的补抓 9:15 → 当前虚拟时钟 段
+        new_syms = [s for s in symbols if s not in backfilled]
+        if new_syms:
+            backfilled.update(new_syms)
+            try:
+                current_clock = provider.mock_clock()
+                if current_clock is not None and current_clock > today_0915:
+                    _backfill_new_symbols(new_syms, current_clock)
+            except Exception as e:
+                logger.warning("mock new-symbol backfill check failed: %s", e)
         if symbols:
             df = provider.get_realtime(symbols)
             if not df.is_empty():
                 scheduler.store().append(df, kind="mock")
+                # mock 全链路：把虚拟 tick 广播给模块回调（超买超卖/持仓T 评估 + 推送）
+                try:
+                    scheduler.dispatch_mock(df)
+                except Exception as e:
+                    logger.warning("mock dispatch to modules failed: %s", e)
                 # 用最新 tick 的 ts_ms（虚拟时钟推进后的时间戳）作为「最近 tick」，
                 # 而不是 time.time()（真实挂钟时间戳）。这样前端显示就能反映 mock
                 # 虚拟时钟推进到的时间（如 9:15、9:16…），与起点 start_time 一致。
@@ -767,14 +827,14 @@ def startup(context: ExtensionContext) -> None:
 
             if fr_config.get_module_enabled("overbought_oversold"):
                 # repository 由 main 注入到 app.state，启动时已就绪；这里延后取
-                def _overbought_callback(df) -> None:
+                def _overbought_callback(df, source: str = "real") -> None:
                     try:
                         repo = _get_repo_from_app()
                     except Exception:
                         return
                     sigs = overbought_oversold.evaluate(df, repo)
                     if sigs:
-                        _push_overbought_signals(sigs)
+                        _push_overbought_signals(sigs, source=source)
 
                 fr_scheduler.FreeRealtimeScheduler.register_module_callback(_overbought_callback)
 
@@ -814,25 +874,47 @@ def _get_repo_from_app():
     return None
 
 
-def _push_overbought_signals(sigs) -> None:
-    """超买超卖信号推送 — 复用 review_push_channels。"""
+# 同股同方向推送冷却：60s 内同标的同方向只推一次（mock 高频轮询会反复触发）
+_oo_push_cooldown: dict[str, float] = {}
+_OO_PUSH_COOLDOWN_SEC = 60.0
+
+
+def _push_overbought_signals(sigs, source: str = "real") -> None:
+    """超买超卖信号推送 — 复用 review_push_channels。mock 链路带 [MOCK] 前缀。
+
+    消息抑制：同股同方向 60s 内只推送一次。
+    """
     try:
+        import time as _time
+
         from app.services import preferences, webhook_adapter
         from app.services.free_realtime.overbought_oversold import to_dict
 
         channels = preferences.get_review_push_channels()
         if not channels:
             return
-        lines = []
+        now_s = _time.time()
+        pending: list[dict] = []
         for s in sigs:
             d = to_dict(s)
+            key = f"{d['symbol']}:{d['direction']}"
+            last = _oo_push_cooldown.get(key, 0.0)
+            if now_s - last < _OO_PUSH_COOLDOWN_SEC:
+                continue
+            _oo_push_cooldown[key] = now_s
+            pending.append(d)
+        if not pending:
+            return
+        mock_tag = "[MOCK] " if source == "mock" else ""
+        lines = []
+        for d in pending:
             arrow = "↑超买" if d["direction"] == "overbought" else "↓超卖"
             lines.append(
                 f"- {d['name']}({d['symbol']}) 现 {d['last_price']:.2f} "
                 f"MA5 {d['ma5']:.2f} 偏离 {d['deviation_pct']:+.2f}% {arrow}"
             )
         body = "\n".join(lines)
-        title = "超买超卖提示"
+        title = f"{mock_tag}超买超卖提示"
         for ch in channels:
             if ch == "feishu":
                 url = preferences.get_feishu_webhook_url()

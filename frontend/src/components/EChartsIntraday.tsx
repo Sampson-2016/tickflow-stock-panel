@@ -234,6 +234,14 @@ function buildTickOption(
           return d.getTime()
         })(),
         max: (() => { const d = new Date(); d.setHours(15, 0, 0, 0); return d.getTime() })(),
+        // 关键时间刻度：9:15 竞价 / 9:30 开盘 / 10:30 / 11:30 午休 / 13:00 午续 / 14:00 / 15:00 收盘
+        customValues: (() => {
+          const mk = (h: number, m: number) => {
+            const d = new Date(); d.setHours(h, m, 0, 0); return d.getTime()
+          }
+          const ticks = [mk(9, 30), mk(10, 30), mk(11, 30), mk(13, 0), mk(14, 0), mk(15, 0)]
+          return showCallAuction ? [mk(9, 15), ...ticks] : ticks
+        })(),
         axisPointer: {
           show: true,
           lineStyle: { color: ct.crosshair, type: 'dashed', width: 1 },

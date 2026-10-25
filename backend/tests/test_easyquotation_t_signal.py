@@ -19,31 +19,6 @@ import pytest
 
 
 @pytest.fixture
-def fake_easyquotation(monkeypatch):
-    """模拟 easyquotation 包, use('sina') 和 use('hkquote') 返回不同 mock 对象。
-
-    返回 (cn_quotation, hk_quotation) 两个 MagicMock, 让 CNFetcher/HKFetcher 分别命中。
-    """
-    fake_pkg = types.ModuleType("easyquotation")
-    cn_quotation = MagicMock(name="cn_sina")
-    hk_quotation = MagicMock(name="hk_quote")
-
-    def _use(name: str):
-        if name == "sina":
-            return cn_quotation
-        if name == "hkquote":
-            return hk_quotation
-        return MagicMock()
-
-    fake_pkg.use = MagicMock(side_effect=_use)
-    monkeypatch.setitem(sys.modules, "easyquotation", fake_pkg)
-    import app.custom.easyquotation_t_signal as mod
-    monkeypatch.setattr(mod, "HAS_EASYQUOTATION", True)
-    monkeypatch.setattr(mod, "easyquotation", fake_pkg)
-    return cn_quotation, hk_quotation
-
-
-@pytest.fixture
 def tmp_data_dir(tmp_path, monkeypatch):
     """重定向 settings.data_dir 到 tmp_path, 隔离文件落盘。"""
     from app.config import settings
@@ -52,7 +27,7 @@ def tmp_data_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def fresh_module(fake_easyquotation, tmp_data_dir, monkeypatch):
+def fresh_module(tmp_data_dir, monkeypatch):
     """重置模块级单例, 让每个测试干净开始。"""
     import app.custom.easyquotation_t_signal as mod
     # 停掉上一个 fixture 创建的 POLLER 后台线程, 避免 daemon 线程在测试间残留
@@ -188,54 +163,72 @@ class TestQuoteFetcher:
         fetcher = fresh_module.QuoteFetcher()
         assert fetcher.fetch([]) == {}
 
-    def test_fetch_returns_empty_when_easyquotation_missing(self, fresh_module, monkeypatch):
-        monkeypatch.setattr(fresh_module, "HAS_EASYQUOTATION", False)
-        fetcher = fresh_module.QuoteFetcher()
-        # 强制重走 _ensure
-        fetcher.cn._quotation = None
-        fetcher.hk._quotation = None
-        assert fetcher.fetch(["600519.SH", "00700.HK"]) == {}
+    def test_fetch_provider_error_returns_empty(self, fresh_module, monkeypatch):
+        """provider 拉取异常时返回空 dict 且记录 last_error。"""
+        import app.custom.easyquotation_t_signal as mod
 
-    def test_fetch_converts_keys_and_remaps_response(self, fresh_module, fake_easyquotation):
-        cn_q, _hk_q = fake_easyquotation
-        fetcher = fresh_module.QuoteFetcher()
-        cn_q.real.return_value = {
-            "sh600519": _quote("600519", now=1500.0, name="贵州茅台"),
-        }
-        out = fetcher.fetch(["600519.SH"])
-        assert "600519.SH" in out
-        assert out["600519.SH"]["name"] == "贵州茅台"
+        class _BadProvider:
+            def get_realtime(self, symbols):
+                raise RuntimeError("network down")
 
-    def test_fetch_routes_by_market(self, fresh_module, fake_easyquotation):
-        """A 股走 sina, 港股走 hkquote, 美股被跳过。"""
-        cn_q, hk_q = fake_easyquotation
-        cn_q.real.return_value = {}
-        hk_q.real.return_value = {}
-        fetcher = fresh_module.QuoteFetcher()
-        fetcher.fetch(["600519.SH", "00700.HK", "AAPL.US"])
-        # CN sina 只拿到 A 股 key
-        assert cn_q.real.call_args.args[0] == ["sh600519"]
-        # HK hkquote 只拿到港股 key
-        assert hk_q.real.call_args.args[0] == ["00700"]
-
-    def test_fetch_hk_remaps_response(self, fresh_module, fake_easyquotation):
-        """港股 quote 的 key 是纯数字 (无 sh/sz 前缀), 反向映射回项目格式。"""
-        _, hk_q = fake_easyquotation
-        hk_q.real.return_value = {
-            "00700": {"name": "腾讯控股", "price": "413.20", "lastPrice": "419.20"},
-        }
-        fetcher = fresh_module.QuoteFetcher()
-        out = fetcher.fetch(["00700.HK"])
-        assert "00700.HK" in out
-        assert out["00700.HK"]["name"] == "腾讯控股"
-
-    def test_fetch_swallows_exception(self, fresh_module, fake_easyquotation):
-        cn_q, _ = fake_easyquotation
-        fetcher = fresh_module.QuoteFetcher()
-        cn_q.real.side_effect = RuntimeError("network down")
+        fake_registry = types.SimpleNamespace(get_provider=lambda _src: _BadProvider())
+        monkeypatch.setitem(
+            sys.modules, "app.data_providers.free_realtime.registry", fake_registry
+        )
+        fetcher = mod.QuoteFetcher()
         out = fetcher.fetch(["600519.SH"])
         assert out == {}
         assert "network down" in fetcher.last_error
+
+    def test_fetch_maps_rows_by_symbol(self, fresh_module, monkeypatch):
+        """provider 返回的 DataFrame 按 symbol 列映射为 {symbol: row_dict}。"""
+        import polars as pl
+
+        import app.custom.easyquotation_t_signal as mod
+        from app.data_providers.free_realtime.schemas import FREE_REALTIME_SCHEMA
+
+        row = {
+            "symbol": "600519.SH", "name": "贵州茅台", "asset_type": "stock",
+            "last_price": 1500.0, "open": 1490.0, "prev_close": 1495.0,
+            "high": 1510.0, "low": 1488.0, "change_pct": 0.0033,
+            "volume": 100000.0, "amount": 1.5e9,
+            "bid1_price": 1499.99, "ask1_price": 1500.01,
+            "bid1_volume": 100.0, "ask1_volume": 100.0,
+            "source": "sina", "ts_ms": 1, "trade_date": datetime.now().date(),
+        }
+        df = pl.DataFrame([row], schema=FREE_REALTIME_SCHEMA)
+
+        class _FakeProvider:
+            def get_realtime(self, symbols):
+                return df
+
+        fake_registry = types.SimpleNamespace(get_provider=lambda _src: _FakeProvider())
+        monkeypatch.setitem(
+            sys.modules, "app.data_providers.free_realtime.registry", fake_registry
+        )
+        fetcher = mod.QuoteFetcher()
+        out = fetcher.fetch(["600519.SH"])
+        assert "600519.SH" in out
+        assert out["600519.SH"]["name"] == "贵州茅台"
+        assert out["600519.SH"]["last_price"] == 1500.0
+
+    def test_fetch_empty_df_records_error(self, fresh_module, monkeypatch):
+        """provider 返回空 DataFrame 时返回空 dict 并记录 last_error。"""
+        import app.custom.easyquotation_t_signal as mod
+        from app.data_providers.free_realtime.schemas import empty_realtime_df
+
+        class _EmptyProvider:
+            def get_realtime(self, symbols):
+                return empty_realtime_df()
+
+        fake_registry = types.SimpleNamespace(get_provider=lambda _src: _EmptyProvider())
+        monkeypatch.setitem(
+            sys.modules, "app.data_providers.free_realtime.registry", fake_registry
+        )
+        fetcher = mod.QuoteFetcher()
+        out = fetcher.fetch(["600519.SH"])
+        assert out == {}
+        assert fetcher.last_error
 
 
 # ── SignalEvaluator 三件套规则 ─────────────────────────────
@@ -490,17 +483,11 @@ class TestPollerAndAPI:
             "running", "interval_sec", "last_fetch_ms",
             "last_fetch_error", "signals_today", "position_count",
             "enabled_position_count", "auto_push_to_feishu",
-            "easyquotation_installed", "feishu_webhook_configured",
+            "feishu_webhook_configured",
         }
         assert s["running"] is False
-        assert s["easyquotation_installed"] is True
         assert s["position_count"] == 0
         assert s["enabled_position_count"] == 0
-
-    def test_start_requires_easyquotation(self, fresh_module, monkeypatch):
-        monkeypatch.setattr(fresh_module, "HAS_EASYQUOTATION", False)
-        with pytest.raises(RuntimeError, match="easyquotation 未安装"):
-            fresh_module.POLLER.start()
 
     def test_start_stop_cycle(self, fresh_module):
         result = fresh_module.POLLER.start()
@@ -538,7 +525,6 @@ class TestFastAPIRoutes:
         assert r.status_code == 200
         body = r.json()
         assert "running" in body
-        assert "easyquotation_installed" in body
 
     def test_get_config_returns_defaults(self, fresh_module):
         client = self._client(fresh_module)
@@ -569,12 +555,6 @@ class TestFastAPIRoutes:
         cfg = r.json()
         assert "injected" not in cfg
 
-    def test_post_start_returns_503_when_easyquotation_missing(self, fresh_module, monkeypatch):
-        monkeypatch.setattr(fresh_module, "HAS_EASYQUOTATION", False)
-        client = self._client(fresh_module)
-        r = client.post("/api/custom/t-signal/start")
-        assert r.status_code == 503
-
     def test_post_start_stop(self, fresh_module):
         client = self._client(fresh_module)
         r = client.post("/api/custom/t-signal/start")
@@ -594,32 +574,27 @@ class TestFastAPIRoutes:
         assert body["count"] == 0
 
 
-# ── 软依赖: easyquotation 缺失时不破坏模块加载 ───────────────
+# ── 软依赖移除后: 模块加载与路由注册 ────────────────────────
 
 
 class TestMissingDependency:
-    def test_module_loads_without_easyquotation(self, monkeypatch):
-        """easyquotation 缺失时, 模块仍能正常 import 且 HAS_EASYQUOTATION=False。"""
-        # 移除 sys.modules 中的 easyquotation 缓存
-        monkeypatch.delitem(sys.modules, "easyquotation", raising=False)
+    def test_module_loads_and_routes_register(self, monkeypatch, tmp_data_dir):
+        """easyquotation 依赖移除后, 模块仍能正常 import 且路由可注册。"""
         # 重新 import 模块
         if "app.custom.easyquotation_t_signal" in sys.modules:
             monkeypatch.delitem(sys.modules, "app.custom.easyquotation_t_signal")
         import app.custom.easyquotation_t_signal as mod
 
-        # 模拟 easyquotation 不可用
-        monkeypatch.setattr(mod, "HAS_EASYQUOTATION", False)
-        assert mod.HAS_EASYQUOTATION is False
         # 路由仍可注册
         from fastapi import FastAPI
         app = FastAPI()
         app.include_router(mod.router)
-        # status 端点可见 easyquotation_installed=False
+        # status 端点正常响应（不再有 easyquotation_installed 字段）
         from fastapi.testclient import TestClient
         client = TestClient(app)
         r = client.get("/api/custom/t-signal/status")
         assert r.status_code == 200
-        assert r.json()["easyquotation_installed"] is False
+        assert "easyquotation_installed" not in r.json()
 
 
 # ── 集成: load_config / save_config 落盘一致性 ──────────────
@@ -901,9 +876,25 @@ class TestPollerUsesPositionList:
         poller._tick()
         assert poller._fetcher.last_fetch_ms == 0
 
-    def test_tick_only_polls_enabled_positions(self, fresh_module, fake_easyquotation, monkeypatch):
-        cn_q, _hk_q = fake_easyquotation
-        cn_q.real.return_value = {}
+    def test_tick_only_polls_enabled_positions(self, fresh_module, monkeypatch):
+        """_tick 只拉取 enabled 的持仓 T 标的（通过 fake provider 验证）。"""
+        import polars as pl
+
+        from app.data_providers.free_realtime.schemas import FREE_REALTIME_SCHEMA
+
+        captured: dict[str, list[str]] = {}
+
+        class _SpyProvider:
+            def get_realtime(self, symbols):
+                captured["symbols"] = list(symbols)
+                return pl.DataFrame(
+                    [], schema=FREE_REALTIME_SCHEMA
+                )
+
+        fake_registry = types.SimpleNamespace(get_provider=lambda _src: _SpyProvider())
+        monkeypatch.setitem(
+            sys.modules, "app.data_providers.free_realtime.registry", fake_registry
+        )
         # 关闭交易时段限制 (测试机器可能不在 A 股 / 港股交易时间)
         monkeypatch.setattr(fresh_module, "is_trading_now", lambda m, dt=None: True)
         poller = fresh_module.POLLER
@@ -912,7 +903,7 @@ class TestPollerUsesPositionList:
         poller.positions().add("999999.SH", name="假票")
         poller.positions().set_enabled("999999.SH", False)
         poller._tick()
-        called = cn_q.real.call_args.args[0]
-        assert "sh600519" in called
-        assert "sh688498" in called
-        assert "sh999999" not in called
+        called = captured.get("symbols", [])
+        assert "600519.SH" in called
+        assert "688498.SH" in called
+        assert "999999.SH" not in called

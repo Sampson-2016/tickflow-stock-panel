@@ -1,18 +1,19 @@
-"""EasyQuotation T 操作信号 —— 基于新浪/腾讯免费行情的盘中提示。
+"""持仓 T 操作信号 —— 基于统一免费实时行情的盘中提示。
 
 定位:
   - 项目核心监控体系 (MonitorRuleEngine + 数据源插件化) 走 TickFlow,
     适合有 TickFlow 订阅的策略/选股/回测场景。
-  - 本模块为独立轻量通道: 用 easyquotation (免费新浪/腾讯实时行情)
-    给自选股跑盘中 T 操作提示, 推送飞书群机器人。
+  - 本模块为独立轻量通道: 行情统一走 free_realtime provider 层
+    (新浪/腾讯/东财 + mock)，给持仓 T 跑盘中 T 操作提示, 推送飞书群机器人。
   - 不入 enriched pipeline, 不写 parquet, 不进 MonitorRuleEngine,
     完全独立, 失败不污染主流程。
 
 L2 扩展: 文件落在 backend/app/custom/, 由 app.extensions.loader 自动发现,
-不需要改 app/main.py。easyquotation 为软依赖 (顶层 try import, 未装时
-status 端点返回 easyquotation_installed=False, 不影响模块加载和路由注册)。
+不需要改 app/main.py。
 
-依赖安装 (用户主动): uv add easyquotation
+历史说明: 原 easyquotation 拉取路径已移除（2026-10-25），持仓 T 仅由
+统一行情驱动（real 主调度器 + mock 测试页循环注入），目录/扩展 ID
+保留原名仅为兼容前端 import 路径与扩展注册 ID。
 """
 from __future__ import annotations
 
@@ -31,18 +32,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 logger = logging.getLogger(__name__)
-
-# ── easyquotation: 已加入 pyproject.toml dependencies, 但仍 try-import 容错 ──
-# 保留 try/except 是为了:
-# 1. 测试场景可 monkeypatch HAS_EASYQUOTATION=False 验证缺失路径
-# 2. 用户自定义 minimal 安装 (pip uninstall easyquotation) 时不让整个项目挂掉
-try:
-    import easyquotation  # type: ignore[import-not-found]
-
-    HAS_EASYQUOTATION = True
-except ImportError:
-    easyquotation = None  # type: ignore[assignment]
-    HAS_EASYQUOTATION = False
 
 # ── 复用项目现有能力 (不重复实现) ───────────────────────────────
 from app.config import settings  # noqa: E402
@@ -153,6 +142,7 @@ class TSignal:
     change_pct: float
     detail: str            # 单条命中规则的详细描述 (用于卡片正文)
     severity: str           # high / medium
+    source: str = "real"    # "real" 真实行情 / "mock" 测试页虚拟行情
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -205,161 +195,48 @@ def is_supported_symbol(symbol: str) -> bool:
 
 
 # ================================================================
-# 行情拉取 (easyquotation)
+# ================================================================
+# 行情拉取 — 统一走 free_realtime provider 层 (sina/tencent/eastmoney)
+# 原 easyquotation 拉取路径已移除; 持仓T 仅由统一行情驱动
 # ================================================================
 
-class _CNFetcher:
-    """A 股新浪实时行情。字段: now/close/open/high/low/volume/turnover/bid1/ask1。"""
+class QuoteFetcher:
+    """基于 free_realtime provider 的行情拉取; 对调用方暴露统一的 fetch(symbols) 接口。
 
-    def __init__(self) -> None:
-        self._quotation = None
-        self._lock = threading.Lock()
-        self.last_error: str = ""
-        self.last_fetch_ms: float = 0.0
-
-    def _ensure(self) -> bool:
-        if not HAS_EASYQUOTATION:
-            return False
-        if self._quotation is None:
-            with self._lock:
-                if self._quotation is None:
-                    try:
-                        self._quotation = easyquotation.use("sina")  # type: ignore[union-attr]
-                    except Exception as e:
-                        self.last_error = f"easyquotation.sina.init failed: {e}"
-                        logger.warning(self.last_error)
-                        return False
-        return True
-
-    def fetch(self, cn_symbols: list[str]) -> dict[str, dict[str, Any]]:
-        """返回 {项目symbol: 新浪quote_dict}; 失败返回空 dict。"""
-        if not cn_symbols:
-            return {}
-        if not self._ensure():
-            return {}
-
-        key_to_symbol: dict[str, str] = {}
-        for s in cn_symbols:
-            k = to_cn_key(s)
-            if k is not None:
-                key_to_symbol[k] = s
-        if not key_to_symbol:
-            return {}
-
-        try:
-            raw = self._quotation.real(list(key_to_symbol.keys()))  # type: ignore[union-attr]
-            self.last_fetch_ms = time.time() * 1000
-            self.last_error = ""
-        except Exception as e:
-            self.last_error = f"easyquotation.sina.real failed: {e}"
-            logger.warning(self.last_error)
-            return {}
-
-        if not isinstance(raw, dict):
-            return {}
-
-        out: dict[str, dict[str, Any]] = {}
-        for k, payload in raw.items():
-            sym = key_to_symbol.get(k)
-            if sym and isinstance(payload, dict):
-                out[sym] = payload
-        return out
-
-
-class _HKFetcher:
-    """港股腾讯实时行情。字段: price/lastPrice/openPrice/high/low/amount (均为 str)。
-
-    与 A 股差异:
-      - 无 bid1/ask1 (买卖盘失衡规则港股跳过)
-      - 无 volume turnover (量比规则港股跳过, 仅依赖 amount)
-      - 无 change_pct (评估器按 (price-lastPrice)/lastPrice 算)
+    返回 {项目symbol: quote_dict}，字段对齐原 easyquotation 输出口径:
+      now/open/high/low/volume/amount/bid1_price/ask1_price/...
     """
 
     def __init__(self) -> None:
-        self._quotation = None
-        self._lock = threading.Lock()
-        self.last_error: str = ""
-        self.last_fetch_ms: float = 0.0
-
-    def _ensure(self) -> bool:
-        if not HAS_EASYQUOTATION:
-            return False
-        if self._quotation is None:
-            with self._lock:
-                if self._quotation is None:
-                    try:
-                        self._quotation = easyquotation.use("hkquote")  # type: ignore[union-attr]
-                    except Exception as e:
-                        self.last_error = f"easyquotation.hkquote.init failed: {e}"
-                        logger.warning(self.last_error)
-                        return False
-        return True
-
-    def fetch(self, hk_symbols: list[str]) -> dict[str, dict[str, Any]]:
-        if not hk_symbols:
-            return {}
-        if not self._ensure():
-            return {}
-
-        key_to_symbol: dict[str, str] = {}
-        for s in hk_symbols:
-            k = to_hk_key(s)
-            if k is not None:
-                key_to_symbol[k] = s
-        if not key_to_symbol:
-            return {}
-
-        try:
-            raw = self._quotation.real(list(key_to_symbol.keys()))  # type: ignore[union-attr]
-            self.last_fetch_ms = time.time() * 1000
-            self.last_error = ""
-        except Exception as e:
-            self.last_error = f"easyquotation.hkquote.real failed: {e}"
-            logger.warning(self.last_error)
-            return {}
-
-        if not isinstance(raw, dict):
-            return {}
-
-        out: dict[str, dict[str, Any]] = {}
-        for k, payload in raw.items():
-            sym = key_to_symbol.get(k)
-            if sym and isinstance(payload, dict):
-                out[sym] = payload
-        return out
-
-
-class QuoteFetcher:
-    """组合 A 股 + 港股 fetcher; 对调用方暴露统一的 fetch(symbols) 接口。"""
-
-    def __init__(self) -> None:
-        self.cn = _CNFetcher()
-        self.hk = _HKFetcher()
         self.last_error: str = ""
         self.last_fetch_ms: float = 0.0
 
     def fetch(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
-        """按市场分流, 合并结果; 返回 {项目symbol: 原始 quote_dict}。"""
-        cn_syms = [s for s in symbols if is_a_stock(s)]
-        hk_syms = [s for s in symbols if is_hk_stock(s)]
+        from app.data_providers.free_realtime.registry import get_provider
 
+        if not symbols:
+            return {}
         out: dict[str, dict[str, Any]] = {}
-        cn_result = self.cn.fetch(cn_syms) if cn_syms else {}
-        hk_result = self.hk.fetch(hk_syms) if hk_syms else {}
-        out.update(cn_result)
-        out.update(hk_result)
-
-        # 汇总最近一次成功的时间戳 + 错误信息
-        latest_ts = max(self.cn.last_fetch_ms, self.hk.last_fetch_ms)
-        if latest_ts > 0:
-            self.last_fetch_ms = latest_ts
-        # 错误信息优先显示更近的 (一般两个 fetcher 不会同时错)
-        if self.cn.last_error and self.hk.last_error:
-            self.last_error = f"A股: {self.cn.last_error}; 港股: {self.hk.last_error}"
-        elif self.cn.last_error:
-            self.last_error = self.cn.last_error
-        else:
-            self.last_error = self.hk.last_error
+        try:
+            # 轮换源在主调度器已做；此兼容路径直接用首个勾选源
+            sources = __import__(
+                "app.services.free_realtime.config", fromlist=["get_sources"]
+            ).get_sources()
+            source = sources[0] if sources else "sina"
+            df = get_provider(source).get_realtime(symbols)
+        except Exception as e:
+            self.last_error = f"free_realtime fetch failed: {e}"
+            logger.warning(self.last_error)
+            return {}
+        if df.is_empty():
+            self.last_error = "free_realtime fetch empty"
+            return {}
+        self.last_fetch_ms = time.time() * 1000
+        self.last_error = ""
+        for row in df.iter_rows(named=True):
+            sym = str(row.get("symbol") or "")
+            if sym:
+                out[sym] = row
         return out
 
 
@@ -883,7 +760,8 @@ class FeishuPusher:
         first = group[0]
         ts = datetime.fromtimestamp(first.ts_ms / 1000).strftime("%H:%M:%S")
         sign = "+" if first.change_pct > 0 else ""
-        title = f"[T 信号] {first.name} ({symbol}) {sign}{first.change_pct:.2f}%"
+        mock_tag = "[MOCK] " if first.source == "mock" else ""
+        title = f"{mock_tag}[T 信号] {first.name} ({symbol}) {sign}{first.change_pct:.2f}%"
         subtitle = f"{ts} · 现价 {first.price:.2f} · {KIND_LABELS[first.kind]}"
         lines = [
             f"- **{KIND_LABELS[s.kind]}** ({s.severity})\n  {s.detail}"
@@ -940,7 +818,6 @@ class TSignalPoller:
             "position_count": len(all_positions),
             "enabled_position_count": sum(1 for p in all_positions if p.get("enabled")),
             "auto_push_to_feishu": cfg["auto_push_to_feishu"],
-            "easyquotation_installed": HAS_EASYQUOTATION,
             "feishu_webhook_configured": self._feishu_configured(),
         }
 
@@ -958,10 +835,6 @@ class TSignalPoller:
         with self._lock:
             if self._running:
                 return {"ok": True, "already_running": True}
-            if not HAS_EASYQUOTATION:
-                raise RuntimeError(
-                    "easyquotation 未安装, 请先 `uv add easyquotation` (或 pip install easyquotation) 后重启服务"
-                )
             cfg = load_config()
             self._interval = max(1, int(cfg["interval_sec"]))
             self._running = True
@@ -1055,10 +928,11 @@ class TSignalPoller:
     # ── 统一行情模块接入 ───────────────────────────────────────
     # 当 free_realtime 模块的 position_t 开关开启时，由统一调度器驱动评估，
     # 不再使用内部 _tick 自轮询路径（避免重复拉取与节奏冲突）。
-    def on_realtime_df(self, df) -> None:
+    def on_realtime_df(self, df, source: str = "real") -> None:
         """从统一行情调度器接收标准化 DataFrame 并评估三件套信号。
 
         与 _tick 共用评估/落盘/推送逻辑，仅替换数据源 (调度器→本模块)。
+        source: "real"（主调度器）或 "mock"（测试页 mock 循环）。
         线程：由调度器后台线程调用，无需另起线程。
         """
         if df is None or df.is_empty():
@@ -1080,10 +954,14 @@ class TSignalPoller:
         if not enabled_symbols:
             return
         quotes: dict[str, dict[str, Any]] = {}
+        # mock tick 的 ts_ms 是虚拟时钟时间，分时攒点用它；real 用真实挂钟
+        first_ts_ms = 0
         for row in df.iter_rows(named=True):
             sym = str(row.get("symbol") or "")
             if sym not in enabled_symbols:
                 continue
+            if not first_ts_ms:
+                first_ts_ms = int(row.get("ts_ms") or 0)
             quotes[sym] = {
                 "now": row.get("last_price"),
                 "open": row.get("open"),
@@ -1099,7 +977,8 @@ class TSignalPoller:
             }
         if not quotes:
             return
-        now_ms = int(time.time() * 1000)
+        # mock tick 带虚拟时钟 ts_ms，分时攒点用它（与真实挂钟区分，曲线时间轴正确）
+        now_ms = first_ts_ms if (source == "mock" and first_ts_ms) else int(time.time() * 1000)
         self._positions.mark_tick_result(
             requested=enabled_symbols,
             succeeded=set(quotes.keys()),
@@ -1113,6 +992,10 @@ class TSignalPoller:
                 self._intraday.append(sym, now_ms, now_price, volume)
 
         signals = self._evaluator.evaluate(quotes, cfg, now_ms)
+        # mock 链路：虚拟行情产生的信号打 source 标记（落库/推送均可区分）
+        if source != "real":
+            for s in signals:
+                s.source = source
         cooldown = int(cfg["cooldown_seconds"])
         accepted: list[TSignal] = []
         for s in signals:
@@ -1271,11 +1154,9 @@ def setup(registrar: BackendExtensionRegistrar) -> None:
 def startup(context: ExtensionContext) -> None:
     """可选启动钩子: 接入免费实时行情统一调度器。
 
-    决策树（与用户最新确认一致）:
-      - free_realtime 模块 + position_t 子开关均开启
-        → 注册 collector / callback 到统一调度器，自身不再起轮询线程
-      - 否则若 easyquotation 已装且有 enabled 标的
-        → 退回旧路径自轮询（兼容用户未启用统一行情模块的场景）
+    持仓T 仅由统一行情驱动（real 主调度器 + mock 测试页循环），
+    原 easyquotation 自轮询回退路径已移除；未开启统一行情模块时
+    持仓T 页面会提示先开启。
     """
     del context  # 未使用, 仅签名要求
     try:
@@ -1292,16 +1173,5 @@ def startup(context: ExtensionContext) -> None:
                 lambda: list(POLLER.positions().list_enabled_symbols())
             )
             logger.info("t_signal attached to free_realtime scheduler")
-            return
     except Exception as e:
         logger.warning("t_signal attach to free_realtime failed: %s", e)
-
-    # 退回旧路径: 仍依赖 easyquotation 自轮询
-    if not HAS_EASYQUOTATION:
-        return  # 缺 easyquotation 时安静跳过, 用户 /status 端点可见详情
-    if not POLLER.positions().list_enabled_symbols():
-        return  # 没有持仓 T 标的, 不启动后台线程
-    try:
-        POLLER.start()
-    except Exception as e:
-        logger.warning("t_signal auto-start failed: %s", e)

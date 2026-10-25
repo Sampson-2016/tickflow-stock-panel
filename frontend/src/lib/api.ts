@@ -3125,7 +3125,6 @@ export const api = {
       position_count: number
       enabled_position_count: number
       auto_push_to_feishu: boolean
-      easyquotation_installed: boolean
       feishu_webhook_configured: boolean
     }>('/api/custom/t-signal/status'),
   tSignalStart: () =>
@@ -3332,7 +3331,7 @@ export const api = {
         body: JSON.stringify({ overbought_pct: overboughtPct, oversold_pct: oversoldPct }),
       },
     ),
-  freeRealtimeOverboughtSignals: () =>
+  freeRealtimeOverboughtSignals: (source: 'real' | 'mock' = 'real') =>
     request<{
       items: Array<{
         symbol: string
@@ -3347,7 +3346,7 @@ export const api = {
       count: number
       evaluated: number
       error?: string
-    }>('/api/free-realtime/overbought-oversold/signals'),
+    }>(`/api/free-realtime/overbought-oversold/signals?source=${source}`),
 
   // ===== 免费实时行情: 超买超卖收盘报告 =====
   freeRealtimeOoReportGenerate: (categories?: string[], push = true) =>

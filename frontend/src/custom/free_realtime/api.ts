@@ -26,7 +26,8 @@ export const freeRealtimeApi = {
   overboughtSymbolDelete: api.freeRealtimeOverboughtSymbolDelete,
   overboughtSymbolToggle: api.freeRealtimeOverboughtSymbolToggle,
   overboughtSymbolSetThresholds: api.freeRealtimeOverboughtSymbolSetThresholds,
-  overboughtSignals: api.freeRealtimeOverboughtSignals,
+  overboughtSignals: (source: 'real' | 'mock' = 'real') =>
+    api.freeRealtimeOverboughtSignals(source),
   // 超买超卖收盘报告
   ooReportGenerate: api.freeRealtimeOoReportGenerate,
   ooReports: api.freeRealtimeOoReports,

@@ -64,13 +64,6 @@ const toDraft = (c: TSignalConfig): ConfigDraft => ({
 })
 
 function StatusPill({ status }: { status: TSignalStatus }) {
-  if (!status.easyquotation_installed) {
-    return (
-      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-elevated text-xs text-warn">
-        <XCircle className="h-3.5 w-3.5" /> 未安装 easyquotation
-      </span>
-    )
-  }
   if (!status.feishu_webhook_configured) {
     return (
       <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-elevated text-xs text-warn">
@@ -208,10 +201,9 @@ function ControlCard({ status }: { status: TSignalStatus }) {
   }
   const start = useMutation({ mutationFn: tSignalApi.start, onSuccess: invalidateAll })
   const stop = useMutation({ mutationFn: tSignalApi.stop, onSuccess: invalidateAll })
-  const missingDeps = !status.easyquotation_installed
   const blockedReason = !status.enabled_position_count
     ? '请先添加持仓 T 标的并启用'
-    : missingDeps ? '未安装 easyquotation' : null
+    : null
   return (
     <div className="bg-surface border border-border rounded-card p-4">
       <div className="flex items-center justify-between mb-3">
@@ -259,7 +251,7 @@ function ControlCard({ status }: { status: TSignalStatus }) {
         ) : (
           <button
             type="button" onClick={() => start.mutate()}
-            disabled={start.isPending || !status.enabled_position_count || missingDeps}
+            disabled={start.isPending || !status.enabled_position_count}
             className="inline-flex items-center h-8 px-3 rounded-btn bg-accent text-xs text-white hover:bg-accent/90 disabled:opacity-50"
           >
             <Play className="h-3.5 w-3.5 mr-1" /> {start.isPending ? '启动中...' : '启动'}
@@ -362,6 +354,8 @@ export function PositionTPage() {
   const [addOpen, setAddOpen] = useState(false)
   // 配置区折叠状态：默认折叠，让列表+详情占主屏
   const [configCollapsed, setConfigCollapsed] = useState(true)
+  // 数据源视图：real 真实行情 / mock 测试页虚拟行情
+  const [dataSource, setDataSource] = useState<'real' | 'mock'>('real')
 
   const statusQ = useQuery({
     queryKey: statusKey(),
@@ -421,6 +415,23 @@ export function PositionTPage() {
         <div className="flex items-center gap-2">
           <BellRing className="h-5 w-5 text-accent" />
           <h1 className="text-lg font-medium text-foreground">持仓 T</h1>
+          <div className="ml-auto flex rounded-btn border border-border overflow-hidden text-[11px]" title="数据源视图">
+            {(['real', 'mock'] as const).map((k) => (
+              <button
+                key={k}
+                type="button"
+                disabled={k === 'mock' && !frTestStatusQ.data?.mock_running}
+                className={`px-2 h-7 ${
+                  dataSource === k
+                    ? 'bg-accent text-white'
+                    : 'bg-elevated text-secondary hover:text-foreground disabled:opacity-40'
+                }`}
+                onClick={() => setDataSource(k)}
+              >
+                {k === 'real' ? '真实' : 'Mock'}
+              </button>
+            ))}
+          </div>
         </div>
         <p className="mt-1 text-xs text-secondary">
           主动维护「要做 T 的持仓」列表 — 后端每 {status?.interval_sec ?? 3}s 拉一次行情, 命中规则即推飞书 + 落库。
@@ -512,13 +523,13 @@ export function PositionTPage() {
               </div>
 
               {/* 单票详情：直接复用 StockPanel（日K+分时）。
-                  intradayKind="real" 走 free_realtime 模块的 /api/free-realtime/intraday，
+                  intradayKind 走 free_realtime 模块的 /api/free-realtime/intraday（real/mock 视图跟随页头切换），
                   而不是 /api/kline/minute（后者会回退 TickFlow 免费服务，但免费服务不支持分钟K，会失败）。 */}
               {selectedSymbol ? (
                 <StockPanel
                   symbol={selectedSymbol}
                   showIntraday
-                  intradayKind="real"
+                  intradayKind={dataSource}
                   height={560}
                   className="min-w-0"
                   refetchIntervalMs={intradayRefetchMs}

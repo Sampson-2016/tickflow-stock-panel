@@ -292,11 +292,25 @@ class FreeRealtimeScheduler:
     # ── 模块派发 ───────────────────────────────────────
     def _dispatch_to_modules(self, df) -> None:
         """把最新报价广播给已注册的模块评估器（持仓T/超买超卖/自选股）。"""
+        self._dispatch(df, "real")
+
+    def _dispatch(self, df, source: str) -> None:
+        """按数据来源（real/mock）广播给模块回调。回调签名 callback(df, source)。"""
         for callback in self._module_callbacks:
             try:
-                callback(df)
+                callback(df, source)
+            except TypeError:
+                # 兼容旧签名 callback(df)
+                try:
+                    callback(df)
+                except Exception as e:
+                    logger.warning("module callback %s failed: %s", callback, e)
             except Exception as e:
                 logger.warning("module callback %s failed: %s", callback, e)
+
+    def dispatch_mock(self, df) -> None:
+        """mock 循环调用：把虚拟 tick 广播给模块回调（source="mock"）。"""
+        self._dispatch(df, "mock")
 
     _module_callbacks: ClassVar[list[Callable]] = []  # 类级共享，便于注册
 
