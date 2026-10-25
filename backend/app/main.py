@@ -1,6 +1,8 @@
 """FastAPI 入口。"""
 from __future__ import annotations
 
+import gzip
+import io
 import logging
 import sys
 from contextlib import asynccontextmanager
@@ -10,6 +12,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app import __version__
 from app.api import (
@@ -390,6 +394,99 @@ app.add_middleware(
 
 
 # ================================================================
+# 响应 gzip 压缩 (首屏静态资源 + JSON API 传输量降 ~70%)
+# ================================================================
+# 不用 Starlette 自带 GZipMiddleware: 它会把 text/event-stream /
+# application/x-ndjson 等流式响应也包进 deflate 缓冲, 小事件滞留缓冲区,
+# SSE/NDJSON 实时推送被破坏。这里只压缩「一次性完整响应」:
+# 白名单 Content-Type + 非流式才压缩, 流式端点原样透传。
+_COMPRESSIBLE_TYPES = frozenset({
+    "application/json",
+    "application/javascript",
+    "text/javascript",
+    "text/css",
+    "text/html",
+    "text/plain",
+    "image/svg+xml",
+})
+_STREAMING_TYPES = frozenset({"text/event-stream", "application/x-ndjson"})
+
+
+class SelectiveGZipMiddleware:
+    """按响应 Content-Type 选择性 gzip; 流式响应 (SSE/NDJSON) 直接透传。"""
+
+    def __init__(self, app: ASGIApp, minimum_size: int = 1024, compresslevel: int = 6):
+        self.app = app
+        self.minimum_size = minimum_size
+        self.compresslevel = compresslevel
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        if "gzip" not in Headers(scope=scope).get("Accept-Encoding", ""):
+            return await self.app(scope, receive, send)
+
+        buf = io.BytesIO()
+        gzip_file = gzip.GzipFile(mode="wb", fileobj=buf, compresslevel=self.compresslevel)
+        state = {"compress": False, "initial": {}}  # initial: 扣住的 http.response.start
+
+        async def send_with_gzip(message: Message) -> None:
+            mtype = message["type"]
+            if mtype == "http.response.start":
+                headers = MutableHeaders(raw=message["headers"])
+                ctype = headers.get("content-type", "").split(";")[0].strip().lower()
+                content_length = headers.get("content-length")
+                state["compress"] = (
+                    ctype in _COMPRESSIBLE_TYPES
+                    and ctype not in _STREAMING_TYPES
+                    and content_length is not None
+                    and int(content_length) >= self.minimum_size
+                )
+                if not state["compress"]:
+                    await send(message)
+                    return
+                state["initial"] = message  # 扣住响应头, 压缩完成后一并发出
+                return
+
+            # http.response.body
+            if not state["compress"]:
+                await send(message)
+                return
+            body = message.get("body", b"")
+            more_body = message.get("more_body", False)
+            gzip_file.write(body)
+            if not more_body:
+                gzip_file.close()
+                headers = MutableHeaders(raw=state["initial"]["headers"])
+                headers["Content-Encoding"] = "gzip"
+                headers["Content-Length"] = str(buf.tell())
+                headers.add_vary_header("Accept-Encoding")
+                message = dict(message, body=buf.getvalue())
+                await send(state["initial"])
+                await send(message)
+
+        await self.app(scope, receive, send_with_gzip)
+
+
+app.add_middleware(SelectiveGZipMiddleware, minimum_size=1024)
+
+
+class HashedAssetsStaticFiles(StaticFiles):
+    """带一年 immutable 缓存的静态文件服务。
+
+    Vite 产物文件名含内容 hash, 内容变 → 文件名变, 因此可以安全长缓存:
+    二次访问浏览器直接用本地副本, 零网络请求 (否则每次都要发条件请求验证)。
+    """
+
+    async def get_response(self, path: str, scope: Scope):
+        response = await super().get_response(path, scope)
+        # 只给成功/304 响应加缓存头, 404 等错误不缓存
+        if response.status_code < 400:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
+# ================================================================
 # 访问认证中间件
 # ================================================================
 # 拦截所有 /api/ 请求, 三种状态:
@@ -487,7 +584,7 @@ async def capability_denied_handler(request: Request, exc: CapabilityDenied) -> 
 _static = Path(settings.static_dir)
 if _static.exists():
     if (_static / "assets").exists():
-        app.mount("/assets", StaticFiles(directory=_static / "assets"), name="assets")
+        app.mount("/assets", HashedAssetsStaticFiles(directory=_static / "assets"), name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):  # noqa: ARG001

@@ -235,6 +235,7 @@ function buildTickOption(
         })(),
         max: (() => { const d = new Date(); d.setHours(15, 0, 0, 0); return d.getTime() })(),
         // 关键时间刻度：9:15 竞价 / 9:30 开盘 / 10:30 / 11:30 午休 / 13:00 午续 / 14:00 / 15:00 收盘
+        // @ts-expect-error customValues 为 ECharts 5.5 运行时特性, 类型定义尚未收录
         customValues: (() => {
           const mk = (h: number, m: number) => {
             const d = new Date(); d.setHours(h, m, 0, 0); return d.getTime()

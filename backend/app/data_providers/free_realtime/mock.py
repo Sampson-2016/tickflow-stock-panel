@@ -27,6 +27,48 @@ from app.markets import CN_TZ
 
 # 兜底开盘价
 _DEFAULT_BASE_PRICE = 10.0
+# 价格围绕基准价的最大波动幅度（±10%），防止随机游走漂移到离谱价位
+_PRICE_BAND_PCT = 0.10
+# 日线收盘价缓存: symbol -> (date, last_close)
+_close_cache: dict[str, tuple] = {}
+
+
+def _resolve_last_close(symbol: str) -> float | None:
+    """取该标的日线数据中最后一个交易日的 raw_close（当日缓存）。
+
+    用于 mock 未配置 base_prices 时自动以真实最近收盘价为基准，
+    避免 mock 价格（如 10 元）与真实股价（如 345 元）严重脱节。
+    取不到时返回 None（调用方兜底 _DEFAULT_BASE_PRICE）。
+    """
+    today = datetime.now(CN_TZ).date()
+    cached = _close_cache.get(symbol)
+    if cached and cached[0] == today:
+        return cached[1]
+    fallback = cached[1] if cached else None
+    try:
+        from datetime import date as _date, timedelta as _timedelta
+
+        from app.main import app as _fastapp
+
+        repo = getattr(_fastapp.state, "repo", None)
+        if repo is None:
+            return fallback
+        end = _date.today()
+        start = end - _timedelta(days=30)
+        df = repo.get_daily(symbol, start, end, columns=["date", "raw_close"])
+        if df.is_empty() or "raw_close" not in df.columns:
+            return fallback
+        vals = [
+            v for v in df.sort("date")["raw_close"].to_list()
+            if v is not None and v > 0
+        ]
+        if not vals:
+            return fallback
+        close = float(vals[-1])
+        _close_cache[symbol] = (today, close)
+        return close
+    except Exception:
+        return fallback
 
 
 def _parse_start_time(raw: str | None) -> dt_time | None:
@@ -151,16 +193,19 @@ class MockProvider(FreeRealtimeProvider):
         self._fail_remaining = max(0, consecutive)
 
     def _next_price(self, symbol: str, base: float) -> float:
-        """随机游走：单步变动 = uniform(-vol*prev, vol*prev)。"""
+        """随机游走：单步变动 = uniform(-vol*prev, vol*prev)，并钳制在基准价 ±10%。"""
         prev = self._current_prices.get(symbol)
+        lo = base * (1.0 - _PRICE_BAND_PCT)
+        hi = base * (1.0 + _PRICE_BAND_PCT)
         if prev is None:
             price = base
         else:
             vol = self._config.get("volatility_pct", 0.01)
             delta = self._rng.uniform(-vol * prev, vol * prev)
             price = prev + delta
-            if price <= 0:
-                price = base
+        price = min(hi, max(lo, price))
+        if price <= 0:
+            price = base
         self._current_prices[symbol] = price
         return price
 
@@ -188,7 +233,11 @@ class MockProvider(FreeRealtimeProvider):
         names = self._config.get("names", {})
         rows: list[dict] = []
         for sym in symbols:
-            base = base_prices.get(sym, _DEFAULT_BASE_PRICE)
+            # base_prices 未配置（或非法）时，自动取该标的日线最近收盘价为基准，
+            # 避免 mock 价格与真实股价脱节（如真实 345 元 mock 出 10 元）。
+            base = base_prices.get(sym)
+            if base is None or base <= 0:
+                base = _resolve_last_close(sym) or _DEFAULT_BASE_PRICE
             price = self._next_price(sym, base)
             prev_close = base
             change_pct = (price - prev_close) / prev_close if prev_close else 0.0

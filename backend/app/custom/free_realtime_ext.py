@@ -906,12 +906,33 @@ def _push_overbought_signals(sigs, source: str = "real") -> None:
         if not pending:
             return
         mock_tag = "[MOCK] " if source == "mock" else ""
+        # 中文名兜底：mock 链路 name 可能回落为代码本身；
+        # 这里从超买超卖标的清单（含 name 字段）反查中文名，避免 "300757.SZ(300757.SZ)"
+        try:
+            from app.services.free_realtime import config as fr_config
+
+            name_map = {
+                it.get("symbol"): it.get("name")
+                for it in fr_config.list_overbought_symbols()
+                if it.get("symbol") and it.get("name")
+            }
+        except Exception:
+            name_map = {}
         lines = []
         for d in pending:
             arrow = "↑超买" if d["direction"] == "overbought" else "↓超卖"
+            name = d["name"]
+            if not name or name == d["symbol"]:
+                name = name_map.get(d["symbol"], "")
+            # 中文名在前；确实查不到中文名时只展示一次代码，不重复
+            head = (
+                f"{name}({d['symbol']})" if name and name != d["symbol"]
+                else d["symbol"]
+            )
             lines.append(
-                f"- {d['name']}({d['symbol']}) 现 {d['last_price']:.2f} "
-                f"MA5 {d['ma5']:.2f} 偏离 {d['deviation_pct']:+.2f}% {arrow}"
+                f"- {head} 现 {d['last_price']:.2f} "
+                f"MA5 {d['ma5']:.2f} 偏离 {d['deviation_pct']:+.2f}% "
+                f"阈值 {d['threshold_pct']:.2f}% {arrow}"
             )
         body = "\n".join(lines)
         title = f"{mock_tag}超买超卖提示"

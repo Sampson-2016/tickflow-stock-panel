@@ -19,11 +19,9 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="theme-color" content="#8B5CF6" />
     <title>观心台</title>
-    <link rel="preconnect" href="https://rsms.me/" />
-    <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <!-- 不引外部字体 CSS (rsms.me / fonts.googleapis.com):
+         这些是渲染阻塞资源, 国内访问被墙时会挂起到超时, 首屏白屏数十秒。
+         字体回退栈见 tailwind.config.ts (PingFang SC / system-ui / IBM Plex Mono)。 -->
   </head>
   <body class="bg-base text-foreground">
     <div id="root"></div>
