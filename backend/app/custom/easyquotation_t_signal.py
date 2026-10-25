@@ -367,7 +367,10 @@ class SignalEvaluator:
         signals: list[TSignal],
     ) -> None:
         now_price = self._safe_float(raw.get("now"))
-        prev_close = self._safe_float(raw.get("close"))
+        # 昨收: 统一行情 schema 键为 prev_close, 旧 easyquotation 口径为 close, 两者兼容
+        prev_close = self._safe_float(
+            raw.get("prev_close") if raw.get("prev_close") is not None else raw.get("close")
+        )
         volume = self._safe_float(raw.get("volume"))
         bid1_v = self._safe_float(raw.get("bid1_volume"))
         ask1_v = self._safe_float(raw.get("ask1_volume"))
@@ -1152,6 +1155,9 @@ class TSignalPoller:
                 first_ts_ms = int(row.get("ts_ms") or 0)
             quotes[sym] = {
                 "now": row.get("last_price"),
+                # 昨收: 评估器涨跌幅口径依赖 prev_close; 缺失会导致全部信号被跳过
+                "close": row.get("prev_close"),
+                "name": row.get("name"),
                 "open": row.get("open"),
                 "high": row.get("high"),
                 "low": row.get("low"),

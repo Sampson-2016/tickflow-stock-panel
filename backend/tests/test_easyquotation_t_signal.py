@@ -231,6 +231,50 @@ class TestQuoteFetcher:
         assert fetcher.last_error
 
 
+# ── on_realtime_df 统一行情接入 ────────────────────────────
+
+
+class TestOnRealtimeDf:
+    def test_maps_prev_close_and_name_to_evaluator(self, fresh_module, monkeypatch):
+        """统一行情广播的 df 必须把昨收(prev_close→close)与 name 映射给评估器。
+
+        回归: 映射曾漏昨收, 评估器入口 prev_close 判空直接 return,
+        持仓T 模块 real/mock 链路永远零信号。
+        """
+        import polars as pl
+
+        from app.data_providers.free_realtime.schemas import FREE_REALTIME_SCHEMA
+
+        row = {
+            "symbol": "600519.SH", "name": "贵州茅台", "asset_type": "stock",
+            "last_price": 1500.0, "open": 1490.0, "prev_close": 1495.0,
+            "high": 1510.0, "low": 1488.0, "change_pct": 0.0033,
+            "volume": 100000.0, "amount": 1.5e9,
+            "bid1_price": 1499.99, "ask1_price": 1500.01,
+            "bid1_volume": 100.0, "ask1_volume": 100.0,
+            "source": "sina", "ts_ms": 1, "trade_date": datetime.now().date(),
+        }
+        df = pl.DataFrame([row], schema=FREE_REALTIME_SCHEMA)
+
+        mod = fresh_module
+        monkeypatch.setattr(mod.fr_config, "get_module_enabled", lambda m: m == "position_t")
+        poller = mod.POLLER
+        monkeypatch.setattr(poller._positions, "list_enabled_symbols", lambda: ["600519.SH"])
+
+        captured: dict = {}
+
+        def _spy(quotes, cfg, now_ms):
+            captured.update(quotes)
+            return []
+
+        monkeypatch.setattr(poller._evaluator, "evaluate", _spy)
+        poller.on_realtime_df(df, source="mock")
+        q = captured.get("600519.SH") or {}
+        assert q.get("close") == 1495.0
+        assert q.get("name") == "贵州茅台"
+        assert q.get("now") == 1500.0
+
+
 # ── SignalEvaluator 三件套规则 ─────────────────────────────
 
 
@@ -261,6 +305,26 @@ class TestSignalEvaluator:
         quotes = {"600519.SH": _quote("600519", now=10.2, close=10.0)}
         sigs = ev.evaluate(quotes, fresh_module.DEFAULT_CONFIG, now_ms=1)
         assert all(s.kind != fresh_module.KIND_PRICE for s in sigs)
+
+    def test_prev_close_schema_key_triggers(self, fresh_module):
+        """统一行情 schema 键 prev_close（无 close 键）也必须能算涨跌幅。
+
+        回归: 评估器曾只读 easyquotation 口径的 close 键, 统一行情链路
+        昨收恒为 None, 入口判空直接 return, real/mock 全部零信号。
+        """
+        ev = fresh_module.SignalEvaluator()
+        quotes = {
+            "600519.SH": {
+                "name": "贵州茅台", "now": 10.35, "prev_close": 10.0,
+                "open": 10.0, "high": 10.4, "low": 9.9,
+                "volume": 100000.0, "amount": 1.0e6,
+            },
+        }
+        sigs = ev.evaluate(quotes, fresh_module.DEFAULT_CONFIG, now_ms=1)
+        s = next((s for s in sigs if s.kind == fresh_module.KIND_PRICE), None)
+        assert s is not None
+        assert s.change_pct == pytest.approx(3.5)
+        assert s.name == "贵州茅台"
 
     def test_volume_surge_after_window_fills(self, fresh_module):
         ev = fresh_module.SignalEvaluator()

@@ -24,6 +24,28 @@ const THEME = {
   avgLine: '#F59E0B',
 }
 
+/** 最新价角标: 右上角展示 当前股价 + 相对昨收涨跌幅 (涨红跌绿)。 */
+function latestPriceGraphic(latestClose: number | undefined, prevClose: number | undefined): any {
+  if (latestClose == null || !Number.isFinite(latestClose)) return undefined
+  if (!prevClose || prevClose <= 0 || !Number.isFinite(prevClose)) return undefined
+  const pct = (latestClose - prevClose) / prevClose * 100
+  const color = pct > 0.005 ? '#F04438' : pct < -0.005 ? '#12B76A' : '#98A2B3'
+  const pctText = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`
+  return {
+    type: 'text',
+    right: 62,
+    top: 6,
+    silent: true,
+    style: {
+      text: `${latestClose.toFixed(2)}  ${pctText}`,
+      fill: color,
+      fontSize: 12,
+      fontWeight: 600,
+      fontFamily: 'JetBrains Mono, monospace',
+    },
+  }
+}
+
 interface Props {
   data: MinuteKlineRow[]
   height?: number
@@ -109,15 +131,43 @@ function buildTickOption(
     volPairs.push([ms, data[i].volume])
   }
 
-  const allValues: number[] = []
-  if (prevClose != null) allValues.push(prevClose)
-  for (const row of data) allValues.push(row.close)
-  for (const a of avgPrices) if (a != null) allValues.push(a)
-  const yMin = Math.min(...allValues)
-  const yMax = Math.max(...allValues)
-  const yPad = (yMax - yMin) * 0.1 || 1
-  const yMinAdj = yMin - yPad
-  const yMaxAdj = yMax + yPad
+  // Y 轴范围: 有昨收时按「日内最小涨跌幅-1% ~ 最大涨跌幅+1%」(含 0% 昨收基准线),
+  // 左价格轴与右百分比轴共用同一刻度段, 网格线严格对齐; 无昨收回退到原自适应范围
+  const pctAxis = (() => {
+    if (!prevClose || prevClose <= 0 || !Number.isFinite(prevClose) || data.length === 0) return null
+    const pcts: number[] = [0] // 0% = 昨收基准线, 保证 markLine 可见
+    for (const row of data) {
+      if (Number.isFinite(row.close)) pcts.push((row.close - prevClose) / prevClose * 100)
+    }
+    for (const a of avgPrices) {
+      if (a != null && Number.isFinite(a)) pcts.push((a - prevClose) / prevClose * 100)
+    }
+    const lo = Math.min(...pcts) - 1
+    const hi = Math.max(...pcts) + 1
+    return {
+      lo,
+      hi,
+      priceMin: prevClose * (1 + lo / 100),
+      priceMax: prevClose * (1 + hi / 100),
+    }
+  })()
+
+  let yMinAdj: number
+  let yMaxAdj: number
+  if (pctAxis) {
+    yMinAdj = pctAxis.priceMin
+    yMaxAdj = pctAxis.priceMax
+  } else {
+    const allValues: number[] = []
+    if (prevClose != null) allValues.push(prevClose)
+    for (const row of data) allValues.push(row.close)
+    for (const a of avgPrices) if (a != null) allValues.push(a)
+    const yMin = Math.min(...allValues)
+    const yMax = Math.max(...allValues)
+    const yPad = (yMax - yMin) * 0.1 || 1
+    yMinAdj = yMin - yPad
+    yMaxAdj = yMax + yPad
+  }
 
   // 涨跌停 markLine（仅在 limit 模式下显示，与 buildOption 行为一致）
   const markLineData = buildPriceMarkLines(prevClose, priceLines, ct.crosshair, ct.text, ct.tooltipBg)
@@ -235,6 +285,8 @@ function buildTickOption(
         type: 'value',
         min: yMinAdj,
         max: yMaxAdj,
+        // 有昨收时左右轴各分 5 段, 网格线严格对齐
+        interval: pctAxis ? (yMaxAdj - yMinAdj) / 5 : undefined,
         splitArea: { show: false },
         axisLine: { show: false },
         axisTick: { show: false },
@@ -259,16 +311,46 @@ function buildTickOption(
         splitLine: { lineStyle: { color: ct.grid } },
         axisLabel: { color: ct.text, fontSize: 10, fontFamily: 'JetBrains Mono, monospace' },
       },
+      // 右侧百分比轴: 与左侧价格轴同范围, 刻度即涨跌幅。
+      // 注意必须追加在数组末尾(yAxisIndex 2): 成交量 series 固定引用 yAxisIndex 1,
+      // 插在中间会把成交量轴挤到 2 导致 xAxis/yAxis grid 不一致, setOption 抛错
+      ...(pctAxis ? [{
+        type: 'value' as const,
+        position: 'right' as const,
+        gridIndex: 0,
+        min: pctAxis.lo,
+        max: pctAxis.hi,
+        interval: (pctAxis.hi - pctAxis.lo) / 5,
+        splitArea: { show: false },
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: { show: false },
+        axisPointer: {
+          label: {
+            formatter: (params: any) => {
+              const v = params?.value
+              return typeof v === 'number' && Number.isFinite(v) ? `${v >= 0 ? '+' : ''}${v.toFixed(2)}%` : ''
+            },
+          },
+        },
+        axisLabel: {
+          color: ct.text,
+          fontSize: 10,
+          fontFamily: 'JetBrains Mono, monospace',
+          formatter: (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`,
+        },
+      }] : []),
     ],
     dataZoom: [
       { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
       { type: 'inside', yAxisIndex: [0], start: 0, end: 100, zoomOnMouseWheel: false, moveOnMouseWheel: false },
     ],
+    graphic: latestPriceGraphic(data[data.length - 1]?.close, prevClose),
     series,
   }
 }
 
-function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: number[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = [], times: string[] = FULL_DAY_TIMES, tickMode: boolean = false): EChartsOption {
+function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: number[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = [], times: string[] = FULL_DAY_TIMES, tickMode: boolean = false, currentPrice?: number): EChartsOption {
   if (tickMode) {
     // 从 times 推断 showCallAuction：times[0] === "09:15" 表示含集合竞价段
     const showCallAuction = times.length > 0 && times[0] === '09:15'
@@ -548,6 +630,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         barMinWidth: 1,
       },
     ],
+    graphic: latestPriceGraphic(currentPrice ?? data[data.length - 1]?.close, prevClose),
   }
 }
 
@@ -702,11 +785,11 @@ export function EChartsIntraday({
       }
       fullDayToDataIdx.current = mapping
 
-      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, times, tickMode), true)
+      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, times, tickMode, currentPrice), true)
     } else {
       chart.clear()
     }
-  }, [data, prevClose, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, times, tickMode])
+  }, [data, prevClose, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, times, tickMode, currentPrice])
 
   useEffect(() => {
     return () => {
