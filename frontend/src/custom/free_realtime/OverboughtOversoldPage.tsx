@@ -45,7 +45,22 @@ export function OverboughtOversoldPage() {
   const [filter, setFilter] = useState<'all' | 'signals' | 'enabled'>('all')
   const [addOpen, setAddOpen] = useState(false)
   // 数据源视图：real 真实行情 / mock 测试页虚拟行情（mock 运行中才可切）
-  const [dataSource, setDataSource] = useState<'real' | 'mock'>('real')
+  // sessionStorage 持久化：刷新页面后保持在原视图
+  const [dataSource, setDataSource] = useState<'real' | 'mock'>(() => {
+    try {
+      return sessionStorage.getItem('oo.dataSource') === 'mock' ? 'mock' : 'real'
+    } catch {
+      return 'real'
+    }
+  })
+  const switchDataSource = (k: 'real' | 'mock') => {
+    setDataSource(k)
+    try {
+      sessionStorage.setItem('oo.dataSource', k)
+    } catch {
+      // sessionStorage 不可用时静默降级为纯内存 state
+    }
+  }
 
   // 调度器状态（用于分时图持续刷新）；queryKey 与配置页/弹窗统一为 ['free-realtime','status']
   const statusQ = useFreeRealtimeSchedulerStatus()
@@ -104,12 +119,14 @@ export function OverboughtOversoldPage() {
   const signals = signalsQ.data?.items ?? []
   const moduleEnabled = !!status?.modules?.overbought_oversold
 
-  // mock 循环停止后自动切回真实数据源，避免停在无数据的 mock 视图
+  // mock 循环停止后自动切回真实数据源，避免停在无数据的 mock 视图。
+  // 必须等测试页状态真正加载（isSuccess）后再判断，否则刷新瞬间
+  // mock_running 还是 undefined，会把持久化的 Mock 视图错误地切回真实。
   useEffect(() => {
-    if (dataSource === 'mock' && !frTestStatusQ.data?.mock_running) {
-      setDataSource('real')
+    if (frTestStatusQ.isSuccess && dataSource === 'mock' && !frTestStatusQ.data?.mock_running) {
+      switchDataSource('real')
     }
-  }, [dataSource, frTestStatusQ.data])
+  }, [frTestStatusQ.isSuccess, frTestStatusQ.data, dataSource])
 
   // 信号按 symbol 索引，便于列表加徽章
   const signalBySymbol = useMemo(() => {
@@ -157,7 +174,7 @@ export function OverboughtOversoldPage() {
                     ? 'bg-accent text-white'
                     : 'bg-elevated text-secondary hover:text-foreground disabled:opacity-40'
                 }`}
-                onClick={() => setDataSource(k)}
+                onClick={() => switchDataSource(k)}
               >
                 {k === 'real' ? '真实' : 'Mock'}
               </button>

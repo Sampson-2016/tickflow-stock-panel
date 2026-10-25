@@ -26,6 +26,54 @@ const QK = ['free-realtime'] as const
 const configKey = () => [...QK, 'config'] as const
 const statusKey = () => [...QK, 'status'] as const
 
+/** 标的来源（共享）：调度器/测试页循环每轮实际拉取的标的。
+ *  与测试页共用 collect-symbols 接口；运行中 5s 轮询，停止时 30s 慢轮询兜底。 */
+function SharedSymbolsSection() {
+  const statusQ = useQuery({
+    queryKey: statusKey(),
+    queryFn: freeRealtimeApi.status,
+    refetchInterval: 5000,
+  })
+  const running = statusQ.data?.running ?? false
+  const collectQ = useQuery({
+    queryKey: ['free-realtime-test', 'collect-symbols'],
+    queryFn: freeRealtimeApi.testCollectSymbols,
+    refetchInterval: running ? 5000 : 30000,
+  })
+  const items = collectQ.data?.items ?? []
+  return (
+    <section className="rounded border p-4">
+      <h2 className="mb-2 text-lg font-medium">标的来源（共享）</h2>
+      <p className="mb-3 text-sm text-muted-foreground">
+        调度器与测试页循环每轮实际拉取的标的，来自「持仓T / 自选股 / 超买超卖」三个模块已启用标的的合集。
+      </p>
+      {items.length === 0 ? (
+        <p className="text-sm text-amber-500">
+          当前无已启用标的 — 请在「持仓T / 自选股 / 超买超卖」模块中开启至少一只。
+        </p>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {items.map((it) => (
+            <span
+              key={it.symbol}
+              className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] bg-elevated border border-border"
+              title={it.source ? `来源: ${MODULE_LABELS[it.source as keyof typeof MODULE_LABELS] ?? it.source}` : undefined}
+            >
+              {it.name && <span className="text-foreground">{it.name}</span>}
+              <span className="font-mono text-muted">{it.symbol}</span>
+              {it.source && (
+                <span className="px-1 rounded bg-accent/10 text-accent">
+                  {MODULE_LABELS[it.source as keyof typeof MODULE_LABELS] ?? it.source}
+                </span>
+              )}
+            </span>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
 interface Draft {
   interval_sec: string
   retention_days: string
@@ -173,6 +221,9 @@ export function FreeRealtimeConfigPage() {
           最近错误：{status.last_error}
         </div>
       )}
+
+      {/* 标的来源（共享）：调度器/测试页循环每轮实际拉取的标的，中文名+代码+来源模块 */}
+      <SharedSymbolsSection />
 
       <section className="rounded border p-4">
         <h2 className="mb-3 text-lg font-medium">全局配置</h2>

@@ -14,7 +14,8 @@ import random
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime, time as dt_time
+from datetime import datetime
+from datetime import time as dt_time
 from typing import ClassVar
 
 from app.config import settings
@@ -41,12 +42,17 @@ _CAPTURE_SESSIONS = (
 
 
 def is_capture_now(dt: datetime | None = None) -> bool:
-    """当前是否处于 A 股免费行情抓取时段（9:15-11:30 + 13:00-15:00，含集合竞价）。"""
-    t = (dt or datetime.now(CN_TZ)).time()
-    for start, end in _CAPTURE_SESSIONS:
-        if start <= t < end:
-            return True
-    return False
+    """当前是否处于 A 股免费行情抓取时段（9:15-11:30 + 13:00-15:00，含集合竞价）。
+
+    仅限 A 股交易日：周六/周日（北京时间）直接返回 False。
+    法定节假日无权威日历可复用，此处不判断；节假日误抓的代价仅为
+    返回前收盘价快照，不影响正确性。
+    """
+    now = dt or datetime.now(CN_TZ)
+    if now.weekday() >= 5:  # 5=Sat, 6=Sun
+        return False
+    t = now.time()
+    return any(start <= t < end for start, end in _CAPTURE_SESSIONS)
 
 
 class CircuitBreaker:

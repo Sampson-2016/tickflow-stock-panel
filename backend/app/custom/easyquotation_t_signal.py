@@ -33,6 +33,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "cooldown_seconds": 60,
     "trading_hours_only": True,
     "auto_push_to_feishu": True,
+    # 策略选项: 盘中实时计算哪些信号算法 (空列表 = 全部禁用, 只攒分时不推信号)
+    # 注意: STRATEGY_KINDS 在下方信号模型处定义, 这里用字面量保持定义顺序
+    "strategies": [
+        "price_change",
+        "volume_surge",
+        "big_order_imbalance",
+        "vwap_revert",
+        "rsi_extreme",
+        "range_break",
+    ],
 }
 
 # 字段白名单, PUT /config 时过滤未知字段 (fail-closed, 避免外部误传)
@@ -115,6 +126,9 @@ def save_config(cfg: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("trading_hours_only 必须是 bool")
     if not isinstance(cleaned["auto_push_to_feishu"], bool):
         raise ValueError("auto_push_to_feishu 必须是 bool")
+    strategies = cleaned["strategies"]
+    if not isinstance(strategies, list) or any(s not in STRATEGY_KINDS for s in strategies):
+        raise ValueError(f"strategies 必须是 {list(STRATEGY_KINDS)} 的子集")
     _config_path().write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8")
     return cleaned
 
@@ -123,19 +137,29 @@ def save_config(cfg: dict[str, Any]) -> dict[str, Any]:
 # 信号模型
 # ================================================================
 
-# kind: 涨跌幅阈值 / 量比异动 / 买卖盘失衡
+# kind: 涨跌幅阈值 / 量比异动 / 买卖盘失衡 / VWAP均价回归 / RSI极值 / 分时区间突破
 KIND_PRICE = "price_change"
 KIND_VOLUME = "volume_surge"
 KIND_BIG_ORDER = "big_order_imbalance"
+KIND_VWAP_REVERT = "vwap_revert"
+KIND_RSI_EXTREME = "rsi_extreme"
+KIND_RANGE_BREAK = "range_break"
+STRATEGY_KINDS = (KIND_PRICE, KIND_VOLUME, KIND_BIG_ORDER, KIND_VWAP_REVERT, KIND_RSI_EXTREME, KIND_RANGE_BREAK)
 KIND_LABELS = {
     KIND_PRICE: "涨跌幅阈值",
     KIND_VOLUME: "量比异动",
     KIND_BIG_ORDER: "买卖盘失衡",
+    KIND_VWAP_REVERT: "VWAP均价回归",
+    KIND_RSI_EXTREME: "RSI极值反转",
+    KIND_RANGE_BREAK: "分时区间突破",
 }
 KIND_SEVERITY = {
     KIND_PRICE: "high",
     KIND_VOLUME: "medium",
     KIND_BIG_ORDER: "medium",
+    KIND_VWAP_REVERT: "medium",
+    KIND_RSI_EXTREME: "medium",
+    KIND_RANGE_BREAK: "high",
 }
 
 
@@ -266,9 +290,20 @@ class SignalEvaluator:
     """
 
     WINDOW = 20                  # 量比窗口: 最近 20 次拉取的成交额
+    RSI_PERIOD = 14              # RSI 计算周期 (按拉取轮次近似, 非固定 bar)
+    RANGE_LOOKBACK = 30          # 分时区间突破: 回看最近 30 轮高低点
 
     def __init__(self) -> None:
         self._vol_history: dict[str, deque[float]] = {}
+        # 新策略依赖的进程内价格窗口 (每标的最近 N 轮价格)
+        self._price_history: dict[str, deque[float]] = {}
+        # VWAP 累计: 当日累计成交额/成交量 (由行情字段直接给出, 无需自算)
+        self._day_key: dict[str, str] = {}  # symbol -> 所属交易日 (跨日清零窗口)
+
+    def _push_price(self, symbol: str, price: float) -> deque[float]:
+        hist = self._price_history.setdefault(symbol, deque(maxlen=max(self.RSI_PERIOD + 1, self.RANGE_LOOKBACK)))
+        hist.append(price)
+        return hist
 
     def _push_volume(self, symbol: str, volume: float | None) -> None:
         if volume is None or volume <= 0:
@@ -303,14 +338,17 @@ class SignalEvaluator:
         price_th = float(cfg["price_change_pct_threshold"])
         vol_th = float(cfg["volume_ratio_threshold"])
         imb_th = float(cfg["big_order_imbalance_threshold"])
+        strategies = set(cfg.get("strategies") or STRATEGY_KINDS)
 
         for symbol, raw in quotes.items():
             name = str(raw.get("name") or symbol)
 
-            # 按市场分流: A 股走三件套, 港股仅涨跌幅 (无盘口/无 turnover)
+            # 按市场分流: A 股走全部策略, 港股仅涨跌幅 (无盘口/无 turnover)
             if is_a_stock(symbol):
-                self._evaluate_a_stock(symbol, raw, name, price_th, vol_th, imb_th, now_ms, signals)
-            elif is_hk_stock(symbol):
+                self._evaluate_a_stock(
+                    symbol, raw, name, price_th, vol_th, imb_th, strategies, now_ms, signals
+                )
+            elif is_hk_stock(symbol) and KIND_PRICE in strategies:
                 self._evaluate_hk(symbol, raw, name, price_th, now_ms, signals)
             # 其他市场直接跳过
 
@@ -324,6 +362,7 @@ class SignalEvaluator:
         price_th: float,
         vol_th: float,
         imb_th: float,
+        strategies: set[str],
         now_ms: int,
         signals: list[TSignal],
     ) -> None:
@@ -339,7 +378,7 @@ class SignalEvaluator:
         change_pct = (now_price - prev_close) / prev_close * 100.0
 
         # ── 1. 涨跌幅阈值 ──
-        if abs(change_pct) >= price_th:
+        if KIND_PRICE in strategies and abs(change_pct) >= price_th:
             direction = "上涨" if change_pct > 0 else "下跌"
             signals.append(TSignal(
                 kind=KIND_PRICE,
@@ -356,7 +395,7 @@ class SignalEvaluator:
         # ── 2. 量比异动 ──
         self._push_volume(symbol, volume)
         ratio = self._volume_ratio(symbol, volume)
-        if ratio is not None and ratio >= vol_th:
+        if KIND_VOLUME in strategies and ratio is not None and ratio >= vol_th:
             signals.append(TSignal(
                 kind=KIND_VOLUME,
                 symbol=symbol,
@@ -373,7 +412,7 @@ class SignalEvaluator:
             ))
 
         # ── 3. 买卖盘失衡 ──
-        if bid1_v is not None and ask1_v is not None and max(bid1_v, ask1_v) > 0:
+        if KIND_BIG_ORDER in strategies and bid1_v is not None and ask1_v is not None and max(bid1_v, ask1_v) > 0:
             imbalance = abs(bid1_v - ask1_v) / max(bid1_v, ask1_v)
             if imbalance >= imb_th:
                 if bid1_v > ask1_v:
@@ -396,6 +435,131 @@ class SignalEvaluator:
                     ),
                     severity=KIND_SEVERITY[KIND_BIG_ORDER],
                 ))
+
+        # ── 4-6. 新策略: VWAP均价回归 / RSI极值反转 / 分时区间突破 ──
+        self._evaluate_t_strategies(
+            symbol, raw, name, now_price, prev_close, change_pct, strategies, now_ms, signals
+        )
+
+    # 做T策略参数（进程内窗口口径，拉取轮次 ≈ 数秒，窗口仅用于日内相对比较）
+    VWAP_REVERT_PCT = 1.5     # 现价偏离当日 VWAP 超过该百分比视为回归机会
+    RSI_OVERSOLD = 25.0       # RSI 低于该值视为超卖
+    RSI_OVERBOUGHT = 75.0     # RSI 高于该值视为超买
+    RANGE_BREAK_PCT = 0.8     # 突破区间高/低点超过该百分比视为有效突破
+
+    def _evaluate_t_strategies(
+        self,
+        symbol: str,
+        raw: dict[str, Any],
+        name: str,
+        now_price: float,
+        prev_close: float,
+        change_pct: float,
+        strategies: set[str],
+        now_ms: int,
+        signals: list[TSignal],
+    ) -> None:
+        hist = self._push_price(symbol, now_price)
+
+        # ── 4. VWAP 均价回归 ──
+        # 当日累计成交额/累计成交量 = 均价 (免费源 amount/volume 为当日累计, 直接可得)。
+        # 价格大幅偏离均价后向均价回归是日内做T的经典高胜率形态:
+        #   正偏离过大 → 冲高回落倾向 (卖出/做T卖点半径), 负偏离过大 → 超跌反弹倾向 (买入)。
+        if KIND_VWAP_REVERT in strategies:
+            amount = self._safe_float(raw.get("amount"))
+            vol = self._safe_float(raw.get("volume"))
+            if amount is not None and vol is not None and vol > 0:
+                vwap = amount / vol
+                if vwap > 0:
+                    dev_pct = (now_price - vwap) / vwap * 100.0
+                    if abs(dev_pct) >= self.VWAP_REVERT_PCT:
+                        tendency = "卖出" if dev_pct > 0 else "买入"
+                        signals.append(TSignal(
+                            kind=KIND_VWAP_REVERT,
+                            symbol=symbol,
+                            name=name,
+                            ts_ms=now_ms,
+                            price=now_price,
+                            prev_close=prev_close,
+                            change_pct=change_pct,
+                            detail=(
+                                f"现价 {now_price:.2f} 偏离当日均价 {vwap:.2f} 达 {dev_pct:+.2f}% "
+                                f"(阈值 ±{self.VWAP_REVERT_PCT:.1f}%) — 倾向: {tendency}"
+                            ),
+                            severity=KIND_SEVERITY[KIND_VWAP_REVERT],
+                        ))
+
+        # ── 5. RSI 极值反转 ──
+        # 以拉取轮次为序列近似短周期 RSI (窗口≈最近 14 轮报价),
+        # 极值反转在震荡市做T胜率较高: 超卖 → 买入倾向, 超买 → 卖出倾向。
+        if KIND_RSI_EXTREME in strategies and len(hist) >= self.RSI_PERIOD + 1:
+            rsi = self._rsi(list(hist))
+            if rsi is not None and (rsi <= self.RSI_OVERSOLD or rsi >= self.RSI_OVERBOUGHT):
+                tendency = "买入" if rsi <= self.RSI_OVERSOLD else "卖出"
+                state = "超卖" if rsi <= self.RSI_OVERSOLD else "超买"
+                signals.append(TSignal(
+                    kind=KIND_RSI_EXTREME,
+                    symbol=symbol,
+                    name=name,
+                    ts_ms=now_ms,
+                    price=now_price,
+                    prev_close=prev_close,
+                    change_pct=change_pct,
+                    detail=(
+                        f"短周期 RSI({self.RSI_PERIOD}) = {rsi:.1f} ({state}, "
+                        f"阈值 {self.RSI_OVERSOLD:.0f}/{self.RSI_OVERBOUGHT:.0f}) — 倾向: {tendency}"
+                    ),
+                    severity=KIND_SEVERITY[KIND_RSI_EXTREME],
+                ))
+
+        # ── 6. 分时区间突破 ──
+        # 回看最近 N 轮价格形成日内小区间, 现价放量突破区间沿:
+        #   突破上沿 → 顺势买入倾向; 跌破下沿 → 顺势卖出倾向。
+        if KIND_RANGE_BREAK in strategies and len(hist) >= self.RANGE_LOOKBACK:
+            window = list(hist)[:-1]  # 排除当前价, 用前 N 轮构成区间
+            hi, lo = max(window), min(window)
+            if hi > lo:
+                if now_price >= hi * (1 + self.RANGE_BREAK_PCT / 100.0):
+                    signals.append(TSignal(
+                        kind=KIND_RANGE_BREAK,
+                        symbol=symbol,
+                        name=name,
+                        ts_ms=now_ms,
+                        price=now_price,
+                        prev_close=prev_close,
+                        change_pct=change_pct,
+                        detail=(
+                            f"突破近 {self.RANGE_LOOKBACK} 轮区间上沿 {hi:.2f} "
+                            f"(现价 {now_price:.2f}, 阈值 +{self.RANGE_BREAK_PCT:.1f}%) — 倾向: 买入"
+                        ),
+                        severity=KIND_SEVERITY[KIND_RANGE_BREAK],
+                    ))
+                elif now_price <= lo * (1 - self.RANGE_BREAK_PCT / 100.0):
+                    signals.append(TSignal(
+                        kind=KIND_RANGE_BREAK,
+                        symbol=symbol,
+                        name=name,
+                        ts_ms=now_ms,
+                        price=now_price,
+                        prev_close=prev_close,
+                        change_pct=change_pct,
+                        detail=(
+                            f"跌破近 {self.RANGE_LOOKBACK} 轮区间下沿 {lo:.2f} "
+                            f"(现价 {now_price:.2f}, 阈值 -{self.RANGE_BREAK_PCT:.1f}%) — 倾向: 卖出"
+                        ),
+                        severity=KIND_SEVERITY[KIND_RANGE_BREAK],
+                    ))
+
+    @classmethod
+    def _rsi(cls, prices: list[float]) -> float | None:
+        """Wilder 平滑近似: 用窗口内涨跌幅均值比计算短周期 RSI。"""
+        diffs = [b - a for a, b in pairwise(prices)]
+        gains = sum(d for d in diffs if d > 0)
+        losses = -sum(d for d in diffs if d < 0)
+        total = gains + losses
+        if total <= 0:
+            return None
+        return gains / total * 100.0
 
     def _evaluate_hk(
         self,
@@ -1184,15 +1348,21 @@ def startup(context: ExtensionContext) -> None:
         from app.services.free_realtime import config as fr_config
         from app.services.free_realtime import scheduler as fr_scheduler
 
-        if fr_config.get_global_enabled() and fr_config.get_module_enabled("position_t"):
-            # 注册 symbol 采集器（仅返回 enabled 的持仓 T 标的）
-            fr_scheduler.FreeRealtimeScheduler.register_module_callback(
-                POLLER.on_realtime_df
-            )
-            scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
-            scheduler.register_collector(
-                lambda: list(POLLER.positions().list_enabled_symbols())
-            )
-            logger.info("t_signal attached to free_realtime scheduler")
+        # 无条件注册回调与采集器，开关在运行时判断：
+        # 此前仅在启动时两开关同时开启才注册，用户后开开关（或后启用持仓T标的）
+        # 会导致调度器/测试页 mock 循环永远收不到本模块标的，分时图无数据。
+        fr_scheduler.FreeRealtimeScheduler.register_module_callback(
+            POLLER.on_realtime_df
+        )
+        scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
+
+        def _position_t_collector() -> list[str]:
+            # 运行时校验：模块关闭时不返回标的
+            if not (fr_config.get_global_enabled() and fr_config.get_module_enabled("position_t")):
+                return []
+            return list(POLLER.positions().list_enabled_symbols())
+
+        scheduler.register_collector(_position_t_collector)
+        logger.info("t_signal attached to free_realtime scheduler")
     except Exception as e:
         logger.warning("t_signal attach to free_realtime failed: %s", e)

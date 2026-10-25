@@ -2,17 +2,12 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import {
-  Activity,
   AlertTriangle,
   Bell,
   BellRing,
   ChevronDown,
   ChevronRight,
-  Pause,
-  Play,
   Plus,
-  PowerOff,
-  RefreshCcw,
   Settings2,
   Trash2,
   XCircle,
@@ -27,7 +22,6 @@ import { AddPositionDialog } from './AddPositionDialog'
 import {
   tSignalApi,
   type TSignalConfig,
-  type TSignalStatus,
 } from './api'
 
 const QK = ['t-signal'] as const
@@ -36,66 +30,30 @@ const statusKey = () => [...QK, 'status'] as const
 const configKey = () => [...QK, 'config'] as const
 const positionsKey = () => [...QK, 'positions'] as const
 
-function relativeAge(tsMs: number): string {
-  if (!tsMs) return '—'
-  const delta = Math.max(0, Date.now() - tsMs)
-  if (delta < 60_000) return `${Math.round(delta / 1000)}s 前`
-  return `${Math.round(delta / 60_000)}m 前`
-}
-
-function formatTime(tsMs: number): string {
-  if (!tsMs) return '—'
-  const d = new Date(tsMs)
-  return d.toLocaleTimeString('zh-CN', {
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  })
-}
-
 interface ConfigDraft {
-  interval_sec: string
   price_change_pct_threshold: string
   volume_ratio_threshold: string
   big_order_imbalance_threshold: string
   cooldown_seconds: string
+  strategies: string[]
 }
 const toDraft = (c: TSignalConfig): ConfigDraft => ({
-  interval_sec: String(c.interval_sec),
   price_change_pct_threshold: String(c.price_change_pct_threshold),
   volume_ratio_threshold: String(c.volume_ratio_threshold),
   big_order_imbalance_threshold: String(Math.round(c.big_order_imbalance_threshold * 100)),
   cooldown_seconds: String(c.cooldown_seconds),
+  strategies: [...(c.strategies ?? [])],
 })
 
-function StatusPill({ status }: { status: TSignalStatus }) {
-  if (!status.feishu_webhook_configured) {
-    return (
-      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-elevated text-xs text-warn">
-        <Bell className="h-3.5 w-3.5" /> 飞书 webhook 未配置
-      </span>
-    )
-  }
-  if (status.running) {
-    return (
-      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-bull/10 text-xs text-bull">
-        <Activity className="h-3.5 w-3.5" /> 运行中
-      </span>
-    )
-  }
-  return (
-    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-elevated text-xs text-muted">
-      <Pause className="h-3.5 w-3.5" /> 已停止
-    </span>
-  )
-}
-
-function StatusRow({ label, value, ok = true }: { label: string; value: string; ok?: boolean }) {
-  return (
-    <div className="flex items-center justify-between py-1.5 text-sm">
-      <span className="text-muted">{label}</span>
-      <span className={ok ? 'text-foreground' : 'text-warn'}>{value}</span>
-    </div>
-  )
-}
+// 策略选项：key 与后端 STRATEGY_KINDS 对应
+const STRATEGY_OPTIONS: Array<{ key: string; label: string; desc: string }> = [
+  { key: 'price_change', label: '涨跌幅阈值', desc: '现价相对昨收波动超阈值' },
+  { key: 'volume_surge', label: '量比异动', desc: '即时成交额相对近期窗口放量' },
+  { key: 'big_order_imbalance', label: '买卖盘失衡', desc: '买一/卖一挂单量失衡' },
+  { key: 'vwap_revert', label: 'VWAP均价回归', desc: '现价偏离当日均价过大，回归倾向做T' },
+  { key: 'rsi_extreme', label: 'RSI极值反转', desc: '短周期RSI超买/超卖反转倾向' },
+  { key: 'range_break', label: '分时区间突破', desc: '突破/跌破近期分时区间沿，顺势做T' },
+]
 
 function ConfigCard({ config }: { config: TSignalConfig }) {
   const qc = useQueryClient()
@@ -112,32 +70,53 @@ function ConfigCard({ config }: { config: TSignalConfig }) {
   })
   const save = () => {
     mutation.mutate({
-      interval_sec: Number(draft.interval_sec),
       price_change_pct_threshold: Number(draft.price_change_pct_threshold),
       volume_ratio_threshold: Number(draft.volume_ratio_threshold),
       big_order_imbalance_threshold: Number(draft.big_order_imbalance_threshold) / 100,
       cooldown_seconds: Number(draft.cooldown_seconds),
+      strategies: draft.strategies,
     })
+  }
+  const toggleStrategy = (key: string) => {
+    setDraft((d) => ({
+      ...d,
+      strategies: d.strategies.includes(key)
+        ? d.strategies.filter((s) => s !== key)
+        : [...d.strategies, key],
+    }))
   }
   return (
     <div className="bg-surface border border-border rounded-card p-4">
       <div className="flex items-center gap-2 mb-3">
         <Settings2 className="h-4 w-4 text-accent" />
-        <h2 className="text-sm font-medium text-foreground">阈值配置</h2>
+        <h2 className="text-sm font-medium text-foreground">信号策略</h2>
+      </div>
+      {/* 策略多选：勾选哪些算法，盘中就实时计算哪些信号 */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
+        {STRATEGY_OPTIONS.map((s) => {
+          const checked = draft.strategies.includes(s.key)
+          return (
+            <label
+              key={s.key}
+              className={`flex items-start gap-2 px-3 py-2 rounded-btn border cursor-pointer ${
+                checked ? 'bg-accent/10 border-accent/40' : 'bg-elevated border-border'
+              }`}
+            >
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={checked}
+                onChange={() => toggleStrategy(s.key)}
+              />
+              <span className="min-w-0">
+                <span className="block text-xs font-medium text-foreground">{s.label}</span>
+                <span className="block text-[11px] text-muted">{s.desc}</span>
+              </span>
+            </label>
+          )
+        })}
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="block">
-          <span className="text-xs text-muted">拉取间隔 (秒)</span>
-          <input
-            type="number" step="1" min="1"
-            value={draft.interval_sec}
-            onChange={(e) => setDraft({ ...draft, interval_sec: e.target.value })}
-            className="mt-1 w-full bg-elevated border border-border rounded-btn px-2 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-accent"
-          />
-          <span className="text-[11px] text-muted mt-1 block">
-            同时影响: 后端拉取频率 / 日内 K 点密度 / 信号检测延迟
-          </span>
-        </label>
         <label className="block">
           <span className="text-xs text-muted">涨跌幅阈值 (%)</span>
           <input
@@ -192,84 +171,6 @@ function ConfigCard({ config }: { config: TSignalConfig }) {
           {mutation.isPending ? '保存中...' : '保存配置'}
         </button>
       </div>
-    </div>
-  )
-}
-
-function ControlCard({ status }: { status: TSignalStatus }) {
-  const qc = useQueryClient()
-  const invalidateAll = () => {
-    void qc.invalidateQueries({ queryKey: statusKey() })
-    void qc.invalidateQueries({ queryKey: positionsKey() })
-  }
-  const start = useMutation({ mutationFn: tSignalApi.start, onSuccess: invalidateAll })
-  const stop = useMutation({ mutationFn: tSignalApi.stop, onSuccess: invalidateAll })
-  const blockedReason = !status.enabled_position_count
-    ? '请先添加持仓 T 标的并启用'
-    : null
-  return (
-    <div className="bg-surface border border-border rounded-card p-4">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <BellRing className="h-4 w-4 text-accent" />
-          <h2 className="text-sm font-medium text-foreground">全局轮询</h2>
-        </div>
-        <StatusPill status={status} />
-      </div>
-      <p className="text-[11px] text-muted mb-3 -mt-1">
-        控制后台拉取线程; 启停后持仓 T 列表设置保留。
-      </p>
-      <StatusRow label="轮询间隔" value={`${status.interval_sec}s`} ok={status.interval_sec > 0} />
-      <StatusRow
-        label="最后拉取"
-        value={status.last_fetch_ms ? `${relativeAge(status.last_fetch_ms)} (${formatTime(status.last_fetch_ms)})` : '尚未拉取'}
-        ok={!status.last_fetch_error}
-      />
-      {status.last_fetch_error && (
-        <div className="mt-1 text-xs text-warn flex items-start gap-1.5">
-          <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-          <span className="break-all">{status.last_fetch_error}</span>
-        </div>
-      )}
-      <StatusRow
-        label="持仓 T 标的"
-        value={`${status.enabled_position_count} / ${status.position_count} 已启用`}
-        ok={status.enabled_position_count > 0}
-      />
-      <StatusRow label="今日信号" value={String(status.signals_today)} />
-      <StatusRow
-        label="飞书 webhook"
-        value={status.feishu_webhook_configured ? '已配置' : '未配置 (设置页填写)'}
-        ok={status.feishu_webhook_configured}
-      />
-      <div className="mt-3 flex items-center gap-2">
-        {status.running ? (
-          <button
-            type="button" onClick={() => stop.mutate()}
-            disabled={stop.isPending}
-            className="inline-flex items-center h-8 px-3 rounded-btn bg-elevated text-xs text-secondary hover:text-foreground disabled:opacity-50"
-          >
-            <PowerOff className="h-3.5 w-3.5 mr-1" /> 停止
-          </button>
-        ) : (
-          <button
-            type="button" onClick={() => start.mutate()}
-            disabled={start.isPending || !status.enabled_position_count}
-            className="inline-flex items-center h-8 px-3 rounded-btn bg-accent text-xs text-white hover:bg-accent/90 disabled:opacity-50"
-          >
-            <Play className="h-3.5 w-3.5 mr-1" /> {start.isPending ? '启动中...' : '启动'}
-          </button>
-        )}
-        <button
-          type="button" onClick={invalidateAll}
-          className="inline-flex items-center h-8 px-3 rounded-btn bg-elevated text-xs text-secondary hover:text-foreground"
-        >
-          <RefreshCcw className="h-3.5 w-3.5 mr-1" /> 刷新
-        </button>
-      </div>
-      {blockedReason && !status.running && (
-        <p className="mt-2 text-[11px] text-muted">{blockedReason}</p>
-      )}
     </div>
   )
 }
@@ -358,7 +259,22 @@ export function PositionTPage() {
   // 配置区折叠状态：默认折叠，让列表+详情占主屏
   const [configCollapsed, setConfigCollapsed] = useState(true)
   // 数据源视图：real 真实行情 / mock 测试页虚拟行情
-  const [dataSource, setDataSource] = useState<'real' | 'mock'>('real')
+  // 用 sessionStorage 持久化：刷新页面后保持在原视图（同一标签页内有效）
+  const [dataSource, setDataSource] = useState<'real' | 'mock'>(() => {
+    try {
+      return sessionStorage.getItem('positionT.dataSource') === 'mock' ? 'mock' : 'real'
+    } catch {
+      return 'real'
+    }
+  })
+  const switchDataSource = (k: 'real' | 'mock') => {
+    setDataSource(k)
+    try {
+      sessionStorage.setItem('positionT.dataSource', k)
+    } catch {
+      // sessionStorage 不可用时静默降级为纯内存 state
+    }
+  }
 
   const statusQ = useQuery({
     queryKey: statusKey(),
@@ -396,12 +312,14 @@ export function PositionTPage() {
   const config = configQ.data
   const positions = positionsQ.data?.items ?? []
 
-  // mock 循环停止后自动切回真实数据源，避免停在无数据的 mock 视图
+  // mock 循环停止后自动切回真实数据源，避免停在无数据的 mock 视图。
+  // 注意：必须等测试页状态真正加载（isSuccess）后再判断，否则刷新瞬间
+  // mock_running 还是 undefined，会把持久化的 Mock 视图错误地切回真实。
   useEffect(() => {
-    if (dataSource === 'mock' && !frTestStatusQ.data?.mock_running) {
-      setDataSource('real')
+    if (frTestStatusQ.isSuccess && dataSource === 'mock' && !frTestStatusQ.data?.mock_running) {
+      switchDataSource('real')
     }
-  }, [dataSource, frTestStatusQ.data])
+  }, [frTestStatusQ.isSuccess, frTestStatusQ.data, dataSource])
 
   // 选中标的如果不在列表里 (被删了), 自动清空（useEffect 中执行，避免渲染期 setState）
   useEffect(() => {
@@ -427,7 +345,7 @@ export function PositionTPage() {
                     ? 'bg-accent text-white'
                     : 'bg-elevated text-secondary hover:text-foreground disabled:opacity-40'
                 }`}
-                onClick={() => setDataSource(k)}
+                onClick={() => switchDataSource(k)}
               >
                 {k === 'real' ? '真实' : 'Mock'}
               </button>
@@ -435,7 +353,7 @@ export function PositionTPage() {
           </div>
         </div>
         <p className="mt-1 text-xs text-secondary">
-          主动维护「要做 T 的持仓」列表 — 后端每 {status?.interval_sec ?? 3}s 拉一次行情, 命中规则即推飞书 + 落库。
+          主动维护「要做 T 的持仓」列表 — 行情拉取由「A 股免费实时行情」统一调度（间隔/时段/开关），命中规则即推飞书 + 落库。
           单票详情页可看当日分时图与历史信号点位。
         </p>
       </header>
@@ -447,7 +365,9 @@ export function PositionTPage() {
           <EmptyState icon={XCircle} title="加载失败" hint={statusQ.error?.message ?? configQ.error?.message ?? '未知错误'} />
         ) : (
           <>
-            {/* 可折叠配置区：折叠后只显示状态条 */}
+            {/* 可折叠配置区：折叠后只显示状态条。
+                行情拉取已由「A 股免费实时行情」统一收口（间隔/时段/模块开关），
+                此处仅保留阈值与策略配置，不再有全局启停。 */}
             <div className="bg-surface border border-border rounded-card overflow-hidden">
               <button
                 type="button"
@@ -457,16 +377,12 @@ export function PositionTPage() {
                 <div className="flex items-center gap-3 min-w-0">
                   <BellRing className="h-4 w-4 text-accent shrink-0" />
                   <span className="text-sm font-medium text-foreground">
-                    全局轮询 · {status.running ? '运行中' : '已停止'}
+                    信号配置 · 今日信号 {status.signals_today}
                   </span>
                   <span className="text-[11px] text-muted shrink-0">
-                    间隔 {status.interval_sec}s · {status.enabled_position_count}/{status.position_count} 启用 · 今日信号 {status.signals_today}
+                    {status.enabled_position_count}/{status.position_count} 启用
+                    {status.last_fetch_error ? ' · 上轮失败' : ''}
                   </span>
-                  {status.last_fetch_error && (
-                    <span className="text-[11px] text-warn shrink-0 truncate" title={status.last_fetch_error}>
-                      · 上轮失败
-                    </span>
-                  )}
                 </div>
                 <ChevronDown
                   className={`h-4 w-4 text-muted shrink-0 transition-transform ${configCollapsed ? '' : 'rotate-180'}`}
@@ -474,10 +390,7 @@ export function PositionTPage() {
               </button>
               {!configCollapsed && (
                 <div className="border-t border-border">
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-0">
-                    <ControlCard status={status} />
-                    <ConfigCard config={config} />
-                  </div>
+                  <ConfigCard config={config} />
                 </div>
               )}
             </div>

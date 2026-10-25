@@ -41,6 +41,7 @@ import { boardTag, renderBuiltinDataCell } from '@/components/stock-table/primit
 import { getSignals, signalCls, getSortValue, getIntradaySortValue, UNSORTABLE_KEYS } from '@/lib/stock-table'
 import { resolveCandleConfig, resolveIntradayConfig } from '@/lib/list-columns'
 import { useQuoteStatus, useCapabilities, usePreferences } from '@/lib/useSharedQueries'
+import { useFreeRealtimeTestStatus } from '@/custom/free_realtime/hooks'
 import {
   type ColumnConfig,
   BUILTIN_COLUMNS,
@@ -875,17 +876,68 @@ export function Watchlist() {
   // 批量分时数据 (有分钟K批量能力时, 列可见才拉)
   // 刷新策略: 仅当实时行情运行 且 用户在实时监控设置里开启 minute_intraday_refresh 时
   // 按用户设定的间隔轮询 (不接 SSE 高频, 避免每秒拉 TickFlow 触限流); 与 Screener / 设置卡片描述一致。
+  // 数据源视图: real 走分钟K批量; mock 走免费实时行情 mock 分时 (与持仓T/超买超卖页同口径)。
+  // sessionStorage 持久化，刷新后保持原视图。
+  const [dataSource, setDataSourceState] = useState<'real' | 'mock'>(() => {
+    try {
+      return sessionStorage.getItem('watchlist.dataSource') === 'mock' ? 'mock' : 'real'
+    } catch {
+      return 'real'
+    }
+  })
+  const setDataSource = (k: 'real' | 'mock') => {
+    setDataSourceState(k)
+    try {
+      sessionStorage.setItem('watchlist.dataSource', k)
+    } catch {
+      // 存储不可用时静默降级
+    }
+  }
+  const { data: frTestStatusData, isSuccess: frTestStatusLoaded } = useFreeRealtimeTestStatus()
+  const mockRunning = !!frTestStatusData?.mock_running
+  // mock 循环停止后自动切回真实数据源；等状态真正加载后再判断，
+  // 否则刷新瞬间 mock_running 还是 undefined 会把持久化的 Mock 视图错误切回。
+  useEffect(() => {
+    if (frTestStatusLoaded && dataSource === 'mock' && !mockRunning) {
+      setDataSource('real')
+    }
+  }, [frTestStatusLoaded, mockRunning, dataSource])
+
   const { data: prefsData } = usePreferences()
   const intradayRefreshEnabled = prefsData?.minute_intraday_refresh ?? false
   const intradayRefreshInterval = prefsData?.minute_intraday_refresh_interval ?? 6
+  const frIntradayBatchMs = Math.max(1000, intradayRefreshInterval * 1000)
+  const frIntradayBatch = useQuery({
+    queryKey: ['free-realtime', 'intraday-batch', minuteSymbolsKey, dataSource],
+    queryFn: () => api.freeRealtimeIntradayBatch(minuteSymbols, dataSource),
+    enabled: intradayVisible && dataSource === 'mock' && minuteSymbols.length > 0 && !groupCardsOpen,
+    refetchInterval: mockRunning ? frIntradayBatchMs : false,
+  })
   const minuteBatch = useQuery({
     queryKey: QK.minuteBatch(minuteSymbolsKey),
     queryFn: () => api.klineMinuteBatch(minuteSymbols),
-    enabled: intradayVisible && minuteSymbols.length > 0 && !groupCardsOpen,
+    enabled: intradayVisible && dataSource === 'real' && minuteSymbols.length > 0 && !groupCardsOpen,
     staleTime: 10_000,
     refetchInterval: (intradayRefreshEnabled && realtimeRunning) ? intradayRefreshInterval * 1000 : false,
   })
-  const minuteData = intradayVisible ? (minuteBatch.data?.data ?? {}) : {}
+  // mock 行 (free_realtime tick) → MinuteKlineRow: close=last_price, datetime 从 ts_ms 反推
+  const minuteData = useMemo(() => {
+    if (!intradayVisible) return {}
+    if (dataSource === 'real') return minuteBatch.data?.data ?? {}
+    const out: Record<string, MinuteKlineRow[]> = {}
+    for (const [sym, rows] of Object.entries(frIntradayBatch.data?.data ?? {})) {
+      out[sym] = rows.map((r) => ({
+        datetime: new Date(Number(r.ts_ms)).toISOString(),
+        open: Number(r.open ?? 0),
+        high: Number(r.high ?? 0),
+        low: Number(r.low ?? 0),
+        close: Number(r.last_price ?? 0),
+        volume: Number(r.volume ?? 0),
+        amount: Number(r.amount ?? 0),
+      }))
+    }
+    return out
+  }, [intradayVisible, dataSource, minuteBatch.data, frIntradayBatch.data])
 
   const addMutation = useMutation({
     mutationFn: ({ symbol, groupId }: { symbol: string; groupId: string | null }) =>

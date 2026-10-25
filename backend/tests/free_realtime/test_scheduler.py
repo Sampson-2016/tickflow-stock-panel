@@ -16,7 +16,7 @@ class TestCaptureSession:
     """is_capture_now 覆盖 9:15-11:30 + 13:00-15:00（含集合竞价）。"""
 
     def _dt(self, h: int, m: int) -> datetime:
-        return datetime(2026, 10, 24, h, m)
+        return datetime(2026, 10, 23, h, m)  # 周五 (工作日)
 
     def test_before_open_returns_false(self):
         # 9:15 前（含 9:14）不抓

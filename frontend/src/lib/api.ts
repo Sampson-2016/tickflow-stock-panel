@@ -3145,6 +3145,7 @@ export const api = {
       cooldown_seconds: number
       trading_hours_only: boolean
       auto_push_to_feishu: boolean
+      strategies: string[]
     }>('/api/custom/t-signal/config'),
   tSignalPutConfig: (patch: Record<string, unknown>) =>
     request<Record<string, unknown>>('/api/custom/t-signal/config', {
@@ -3274,6 +3275,12 @@ export const api = {
       count: number
       rows: Array<Record<string, number | string>>
     }>(`/api/free-realtime/intraday/${encodeURIComponent(symbol)}?kind=${kind}&days=${days}`),
+
+  freeRealtimeIntradayBatch: (symbols: string[], kind: 'real' | 'mock' = 'real') =>
+    request<{
+      kind: 'real' | 'mock'
+      data: Record<string, Array<Record<string, number | string>>>
+    }>(`/api/free-realtime/intraday-batch?symbols=${encodeURIComponent(symbols.join(','))}&kind=${kind}`),
 
   // ===== 免费实时行情: 超买超卖模块 =====
   freeRealtimeOverboughtSymbols: () =>
@@ -3423,7 +3430,12 @@ export const api = {
       { method: 'POST' },
     ),
   freeRealtimeTestCollectSymbols: () =>
-    request<{ symbols: string[]; running_mock: boolean; running_real: boolean }>(
+    request<{
+      symbols: string[]
+      items: Array<{ symbol: string; name: string; source: string }>
+      running_mock: boolean
+      running_real: boolean
+    }>(
       '/api/free-realtime/test/collect-symbols',
     ),
 }

@@ -135,18 +135,19 @@ export function FreeRealtimeTestPage() {
           </p>
         ) : (
           <div className="flex flex-wrap gap-1.5">
-            {collectedSymbols.map((s) => (
+            {(collectQ.data?.items ?? []).map((it) => (
               <button
-                key={s}
+                key={it.symbol}
                 type="button"
                 className={
-                  previewSymbol === s
-                    ? 'inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono bg-primary text-primary-foreground'
-                    : 'inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono bg-elevated hover:bg-elevated/80'
+                  previewSymbol === it.symbol
+                    ? 'inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-primary text-primary-foreground'
+                    : 'inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-elevated hover:bg-elevated/80'
                 }
-                onClick={() => setPreviewSymbol(s)}
+                onClick={() => setPreviewSymbol(it.symbol)}
               >
-                {s}
+                {it.name && <span>{it.name}</span>}
+                <span className="font-mono">{it.symbol}</span>
               </button>
             ))}
           </div>

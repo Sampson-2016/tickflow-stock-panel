@@ -134,6 +134,25 @@ def get_intraday(symbol: str, kind: str = "real", days: int = 1) -> dict:
     }
 
 
+@router.get("/intraday-batch")
+def get_intraday_batch(symbols: str, kind: str = "real") -> dict:
+    """批量分时数据（自选股分时列 mock/real 视图切换用）。
+
+    symbols: 逗号分隔的标的列表（与单标的接口同口径，最多 50 只）。
+    返回 {data: {symbol: rows}}，rows 字段与 /intraday/{symbol} 一致。
+    """
+    if kind not in ("real", "mock"):
+        raise HTTPException(status_code=400, detail="kind must be real/mock")
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:50]
+    scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
+    today = datetime.now(CN_TZ).date()
+    data: dict[str, list[dict]] = {}
+    for sym in syms:
+        df = scheduler.store().list_day(sym, today, kind=kind)
+        data[sym] = df.to_dicts() if not df.is_empty() else []
+    return {"kind": kind, "data": data}
+
+
 # ── 超买超卖模块端点 ───────────────────────────────────────
 # 超买超卖模块维护自己的独立标的清单（不依赖持仓T/自选股）；
 # 标的 CRUD 在此路由组下，个股 enabled/disabled 控制是否参与评估
@@ -241,6 +260,7 @@ def get_overbought_oversold_signals(source: str = "real") -> dict:
         {"items": [Signal...], "count": N, "evaluated": N}
     """
     import polars as pl
+
     from app.data_providers.free_realtime.schemas import FREE_REALTIME_SCHEMA
 
     scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
@@ -439,10 +459,77 @@ def get_mock_config() -> dict:
 
 @test_router.get("/collect-symbols")
 def get_collect_symbols() -> dict:
-    """返回三个模块当前已启用的标的列表（mock 与真实循环共用）。"""
+    """返回三个模块当前已启用的标的列表（mock 与真实循环共用）。
+
+    附带中文名与来源模块，供测试页/配置页「标的来源（共享）」展示：
+    source ∈ position_t / watchlist / overbought_oversold（同一标的可属多模块，取首个命中）。
+    """
     scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
     symbols = scheduler.collect_symbols()
-    return {"symbols": symbols, "running_mock": _test_state["mock_running"], "running_real": _test_state["real_loop_running"]}
+
+    # 来源模块归属（运行时判断，与各模块 collector 同口径）
+    def _in_position_t(sym: str) -> bool:
+        try:
+            from app.custom.easyquotation_t_signal import POLLER
+            from app.services.free_realtime import config as fr_config
+            return (fr_config.get_global_enabled() and fr_config.get_module_enabled("position_t")
+                    and sym in POLLER.positions().list_enabled_symbols())
+        except Exception:
+            return False
+
+    def _in_watchlist(sym: str) -> bool:
+        try:
+            from app.services import watchlist
+            from app.services.free_realtime import config as fr_config
+            return fr_config.get_module_enabled("watchlist") and any(
+                r.get("symbol") == sym for r in watchlist.list_symbols()
+            )
+        except Exception:
+            return False
+
+    def _in_overbought(sym: str) -> bool:
+        try:
+            from app.services.free_realtime import config as fr_config
+            return fr_config.get_module_enabled("overbought_oversold") and (
+                sym in fr_config.list_overbought_enabled_symbols()
+            )
+        except Exception:
+            return False
+
+    # 中文名：优先 instruments 维表名称映射（股票/ETF/指数统一入口）
+    name_map: dict[str, str] = {}
+    try:
+        repo = _get_repo_from_app()
+        name_map = repo.get_name_map(symbols) if symbols else {}
+    except Exception:
+        name_map = {}
+    # 兜底：持仓T列表自带 name（instruments 未收录时）
+    try:
+        from app.custom.easyquotation_t_signal import POLLER
+        for it in POLLER.positions().list_all():
+            if it.get("symbol") and it.get("name"):
+                name_map.setdefault(it["symbol"], str(it["name"]))
+    except Exception:
+        pass
+
+    items = []
+    for sym in symbols:
+        if _in_position_t(sym):
+            source = "position_t"
+        elif _in_overbought(sym):
+            source = "overbought_oversold"
+        elif _in_watchlist(sym):
+            source = "watchlist"
+        else:
+            source = ""
+        items.append({"symbol": sym, "name": name_map.get(sym, ""), "source": source})
+
+    return {
+        "symbols": symbols,
+        "items": items,
+        "running_mock": _test_state["mock_running"],
+        "running_real": _test_state["real_loop_running"],
+    }
 
 
 @test_router.put("/mock/config")
@@ -595,7 +682,8 @@ def _mock_loop() -> None:
       - 流式第一次 get_realtime 推进到 start_time，tick 在 start_time
       - 无重叠、无间隙
     """
-    from datetime import datetime, time as dt_time, timedelta
+    from datetime import datetime, timedelta
+    from datetime import time as dt_time
 
     from app.data_providers.free_realtime.registry import get_provider
     from app.markets import CN_TZ
