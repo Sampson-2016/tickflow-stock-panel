@@ -46,6 +46,12 @@ function latestPriceGraphic(latestClose: number | undefined, prevClose: number |
   }
 }
 
+export interface IntradayTradeMark {
+  ts_ms: number
+  side: 'buy' | 'sell'
+  price: number
+}
+
 interface Props {
   data: MinuteKlineRow[]
   height?: number
@@ -58,10 +64,55 @@ interface Props {
   priceLines?: { value: number; label?: string; color?: string }[]
   showLimitLines?: boolean
   showAvgLine?: boolean
+  /** T 信号 B/S 标记: 主图散点, B(红)=买入倾向在点下方, S(绿)=卖出倾向在点上方。 */
+  tradeMarks?: IntradayTradeMark[]
   /** tick 视图模式：true 时只画 data 中已发生的分钟点，不铺满全日时间轴。
    *  用于 RealtimeStore tick 路径（mock/实时盘中增量生成），避免 areaStyle 把 9:30 一直拉到 14:57。
    *  默认 false（历史落库完整分时K，用全日时间轴）。 */
   tickMode?: boolean
+}
+
+const MARK_BUY = '#F04438'
+const MARK_SELL = '#12B76A'
+
+/** epoch ms → 北京时间 'HH:MM' (浏览器本地时区, 与用户环境一致)。 */
+function tsToTimeLabel(ts: number): string {
+  const d = new Date(ts)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+/** B/S 标记散点 series: silent 不干扰十字光标与双击画线交互。 */
+function tradeMarkSeries(marks: IntradayTradeMark[] | undefined, mapTs: (ts: number) => any): any[] {
+  if (!marks || marks.length === 0) return []
+  const data = marks
+    .filter((m) => Number.isFinite(m.ts_ms) && isValidPrice(m.price))
+    .map((m) => ({
+      value: [mapTs(m.ts_ms), m.price],
+      itemStyle: { color: m.side === 'sell' ? MARK_SELL : MARK_BUY },
+      label: {
+        show: true,
+        formatter: m.side === 'sell' ? 'S' : 'B',
+        position: m.side === 'sell' ? 'top' : 'bottom',
+        color: m.side === 'sell' ? MARK_SELL : MARK_BUY,
+        fontSize: 10,
+        fontWeight: 700,
+        fontFamily: 'JetBrains Mono, monospace',
+        distance: 4,
+      },
+    }))
+  if (data.length === 0) return []
+  return [{
+    name: 'T信号',
+    type: 'scatter',
+    xAxisIndex: 0,
+    yAxisIndex: 0,
+    symbol: 'circle',
+    symbolSize: 12,
+    z: 12,
+    silent: true,
+    cursor: 'default',
+    data,
+  }]
 }
 
 function fmtAmt(v: number): string {
@@ -118,6 +169,7 @@ function buildTickOption(
   showAvgLine = true,
   priceLines: Props['priceLines'] = [],
   showCallAuction = true,
+  tradeMarks: IntradayTradeMark[] = [],
 ): EChartsOption {
   // closePairs/avgPairs/volPairs 的时间戳与 xAxis min/max（Date.UTC 构造的当日
   // 北京 09:15/09:30）对齐，详见 minuteDatetimeToMs
@@ -212,6 +264,8 @@ function buildTickOption(
       itemStyle: { color: volItemStyle(data[i].close, data[i].open) },
     })),
   })
+  // T 信号 B/S 标记 (time 轴直接用 ts_ms 定位)
+  series.push(...tradeMarkSeries(tradeMarks, (ts) => ts))
 
   return {
     backgroundColor: 'transparent',
@@ -350,11 +404,11 @@ function buildTickOption(
   }
 }
 
-function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: number[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = [], times: string[] = FULL_DAY_TIMES, tickMode: boolean = false, currentPrice?: number): EChartsOption {
+function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: number[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = [], times: string[] = FULL_DAY_TIMES, tickMode: boolean = false, currentPrice?: number, tradeMarks?: IntradayTradeMark[]): EChartsOption {
   if (tickMode) {
     // 从 times 推断 showCallAuction：times[0] === "09:15" 表示含集合竞价段
     const showCallAuction = times.length > 0 && times[0] === '09:15'
-    return buildTickOption(data, prevClose, avgPrices, lineColor, areaColor, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, showCallAuction)
+    return buildTickOption(data, prevClose, avgPrices, lineColor, areaColor, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, showCallAuction, tradeMarks)
   }
   // 将数据映射到全天时间轴上的正确位置
   const timeIndexMap = new Map(times.map((t, i) => [t, i]))
@@ -629,6 +683,11 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         barMaxWidth: 6,
         barMinWidth: 1,
       },
+      // T 信号 B/S 标记: ts_ms → 'HH:MM' 映射到类目轴, 不在全日时间轴上的点丢弃
+      ...tradeMarkSeries(
+        (tradeMarks ?? []).filter((m) => timeIndexMap.has(tsToTimeLabel(m.ts_ms))),
+        tsToTimeLabel,
+      ),
     ],
     graphic: latestPriceGraphic(currentPrice ?? data[data.length - 1]?.close, prevClose),
   }
@@ -647,6 +706,7 @@ export function EChartsIntraday({
   showLimitLines = true,
   showAvgLine = true,
   tickMode = false,
+  tradeMarks,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
@@ -785,11 +845,11 @@ export function EChartsIntraday({
       }
       fullDayToDataIdx.current = mapping
 
-      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, times, tickMode, currentPrice), true)
+      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, times, tickMode, currentPrice, tradeMarks), true)
     } else {
       chart.clear()
     }
-  }, [data, prevClose, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, times, tickMode, currentPrice])
+  }, [data, prevClose, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, times, tickMode, currentPrice, tradeMarks])
 
   useEffect(() => {
     return () => {

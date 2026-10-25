@@ -4,6 +4,7 @@ import { type KlineRow, type FinancialMetricRecord } from '@/lib/api'
 import { StockInfoBar } from '@/components/StockInfoBar'
 import { StockDailyKChart, getDefaultRange, type StockDailyKChartResult } from '@/components/StockDailyKChart'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
+import type { IntradayTradeMark } from '@/components/EChartsIntraday'
 import { useFinancialMetrics } from '@/lib/useFinancials'
 import { useCapabilities } from '@/lib/useSharedQueries'
 import type { ChartMarker, ChartPriceLine, ChartRange } from '@/components/EChartsCandlestick'
@@ -47,6 +48,8 @@ interface Props {
    * - undefined：默认走 klineMinute（落库分钟K）原有逻辑
    */
   intradayKind?: 'mock' | 'real'
+  /** T 信号 B/S 标记 (透传给分时图主图散点)。 */
+  tradeMarks?: IntradayTradeMark[]
 }
 
 export { getDefaultRange }
@@ -61,6 +64,7 @@ export function StockPanel({
   markers,
   ranges,
   priceLines,
+  tradeMarks,
   showLimitMarkers = true,
   showMarkerToggle = true,
   onMonitor,
@@ -196,6 +200,7 @@ export function StockPanel({
               onPriceDoubleClick={onPriceDoubleClick}
               currentPrice={rows[rows.length - 1]?.close}
               priceLines={priceLines}
+              tradeMarks={tradeMarks}
               refetchIntervalMs={refetchIntervalMs}
               intradayKind={intradayKind}
             />

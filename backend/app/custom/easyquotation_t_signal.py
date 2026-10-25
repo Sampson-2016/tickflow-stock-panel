@@ -176,6 +176,7 @@ class TSignal:
     detail: str            # 单条命中规则的详细描述 (用于卡片正文)
     severity: str           # high / medium
     source: str = "real"    # "real" 真实行情 / "mock" 测试页虚拟行情
+    side: str = ""          # 操作倾向: "buy" 买入 / "sell" 卖出 / "" 无方向 (量比等)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -394,6 +395,7 @@ class SignalEvaluator:
                 change_pct=change_pct,
                 detail=f"现价 {now_price:.2f} ({direction} {abs(change_pct):.2f}%, 阈值 ±{price_th:.1f}%)",
                 severity=KIND_SEVERITY[KIND_PRICE],
+                side="sell" if change_pct > 0 else "buy",  # 冲高 T 卖 / 超跌 T 买
             ))
 
         # ── 2. 量比异动 ──
@@ -438,6 +440,7 @@ class SignalEvaluator:
                         f"失衡度 {imbalance:.0%}, 阈值 {imb_th:.0%}) — 倾向: {side_label}"
                     ),
                     severity=KIND_SEVERITY[KIND_BIG_ORDER],
+                    side="buy" if bid1_v > ask1_v else "sell",
                 ))
 
         # ── 4-6. 新策略: VWAP均价回归 / RSI极值反转 / 分时区间突破 ──
@@ -491,6 +494,7 @@ class SignalEvaluator:
                                 f"(阈值 ±{self.VWAP_REVERT_PCT:.1f}%) — 倾向: {tendency}"
                             ),
                             severity=KIND_SEVERITY[KIND_VWAP_REVERT],
+                            side="sell" if dev_pct > 0 else "buy",
                         ))
 
         # ── 5. RSI 极值反转 ──
@@ -514,6 +518,7 @@ class SignalEvaluator:
                         f"阈值 {self.RSI_OVERSOLD:.0f}/{self.RSI_OVERBOUGHT:.0f}) — 倾向: {tendency}"
                     ),
                     severity=KIND_SEVERITY[KIND_RSI_EXTREME],
+                    side="buy" if rsi <= self.RSI_OVERSOLD else "sell",
                 ))
 
         # ── 6. 分时区间突破 ──
@@ -537,6 +542,7 @@ class SignalEvaluator:
                             f"(现价 {now_price:.2f}, 阈值 +{self.RANGE_BREAK_PCT:.1f}%) — 倾向: 买入"
                         ),
                         severity=KIND_SEVERITY[KIND_RANGE_BREAK],
+                        side="buy",
                     ))
                 elif now_price <= lo * (1 - self.RANGE_BREAK_PCT / 100.0):
                     signals.append(TSignal(
@@ -552,6 +558,7 @@ class SignalEvaluator:
                             f"(现价 {now_price:.2f}, 阈值 -{self.RANGE_BREAK_PCT:.1f}%) — 倾向: 卖出"
                         ),
                         severity=KIND_SEVERITY[KIND_RANGE_BREAK],
+                        side="sell",
                     ))
 
     @classmethod
@@ -599,6 +606,7 @@ class SignalEvaluator:
                 change_pct=change_pct,
                 detail=f"现价 {price:.2f} ({direction} {abs(change_pct):.2f}%, 阈值 ±{price_th:.1f}%)",
                 severity=KIND_SEVERITY[KIND_PRICE],
+                side="sell" if change_pct > 0 else "buy",
             ))
 
 

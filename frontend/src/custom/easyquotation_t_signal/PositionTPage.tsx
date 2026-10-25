@@ -29,6 +29,7 @@ const QK = ['t-signal'] as const
 const statusKey = () => [...QK, 'status'] as const
 const configKey = () => [...QK, 'config'] as const
 const positionsKey = () => [...QK, 'positions'] as const
+const signalsKey = () => [...QK, 'signals', 'recent'] as const
 
 interface ConfigDraft {
   price_change_pct_threshold: string
@@ -308,6 +309,32 @@ export function PositionTPage() {
   // 分时图轮询节奏：跟随免费实时行情调度器/测试页循环（与超买超卖页同口径），
   // 不再用 t-signal 全局轮询状态做门控
   const intradayRefetchMs = useFreeRealtimeIntradayRefetchMs()
+  // 今日信号列表（全部标的，real/mock 都含）；同时供分时图 B/S 标记取数
+  const signalsQ = useQuery({
+    queryKey: signalsKey(),
+    queryFn: () => tSignalApi.recent(300),
+    refetchInterval: intradayRefetchMs || 8000,
+  })
+  const todaySignals = useMemo(() => {
+    const today = new Date().toDateString()
+    return (signalsQ.data?.items ?? []).filter(
+      (s) => new Date(s.ts_ms).toDateString() === today,
+    )
+  }, [signalsQ.data])
+  // 选中标的的 B/S 标记（有方向的信号才上图标；价格取信号触发时点的现价）
+  const tradeMarks = useMemo(
+    () =>
+      selectedSymbol
+        ? todaySignals
+            .filter((s) => s.symbol === selectedSymbol && s.price > 0)
+            .map((s) => ({
+              ts_ms: s.ts_ms,
+              side: (s.side === 'sell' ? 'sell' : 'buy') as 'buy' | 'sell',
+              price: s.price,
+            }))
+        : undefined,
+    [todaySignals, selectedSymbol],
+  )
   const status = statusQ.data
   const config = configQ.data
   const positions = positionsQ.data?.items ?? []
@@ -395,45 +422,96 @@ export function PositionTPage() {
               )}
             </div>
 
-            {/* 列表 + 详情：右侧整体复用 StockPanel（日K+分时） */}
+            {/* 列表 + 详情：右侧整体复用 StockPanel（日K+分时）。
+                左列 = 持仓T列表(上半) + 今日信号(下半)，各占一半高度、各自滚动；右列 = 详情占满剩余宽度 */}
             <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-4 flex-1 min-h-0">
-              {/* 持仓 T 列表 */}
-              <div className="bg-surface border border-border rounded-card flex flex-col overflow-hidden">
-                <div className="flex items-center justify-between px-4 py-2 border-b border-border">
-                  <h2 className="text-sm font-medium text-foreground">
-                    持仓 T 列表 ({positions.length})
-                  </h2>
-                  <button
-                    type="button"
-                    onClick={() => setAddOpen(true)}
-                    className="inline-flex items-center h-7 px-2 rounded-btn bg-accent text-[11px] text-white hover:bg-accent/90"
-                  >
-                    <Plus className="h-3 w-3 mr-0.5" /> 添加
-                  </button>
-                </div>
-                {positions.length === 0 ? (
-                  <EmptyState
-                    icon={Bell}
-                    title="持仓 T 列表为空"
-                    hint="点击「添加」输入项目 symbol (300308.SZ / 00700.HK), 添加后启用即可开始日内监控。"
-                  />
-                ) : (
-                  <div className="overflow-auto">
-                    {positions.map((p) => (
-                      <PositionRow
-                        key={p.symbol}
-                        symbol={p.symbol}
-                        name={p.name}
-                        enabled={p.enabled}
-                        active={p.symbol === selectedSymbol}
-                        dataStatus={p.data_status}
-                        onSelect={() => setSelectedSymbol(p.symbol)}
-                        onToggleEnabled={() => toggleEnabled.mutate({ symbol: p.symbol, enabled: !p.enabled })}
-                        onRemove={() => remove.mutate(p.symbol)}
-                      />
-                    ))}
+              {/* 左列容器 */}
+              <div className="flex flex-col gap-4 min-h-0">
+                {/* 持仓 T 列表（上半） */}
+                <div className="bg-surface border border-border rounded-card flex flex-col overflow-hidden flex-1 min-h-0">
+                  <div className="flex items-center justify-between px-4 py-2 border-b border-border">
+                    <h2 className="text-sm font-medium text-foreground">
+                      持仓 T 列表 ({positions.length})
+                    </h2>
+                    <button
+                      type="button"
+                      onClick={() => setAddOpen(true)}
+                      className="inline-flex items-center h-7 px-2 rounded-btn bg-accent text-[11px] text-white hover:bg-accent/90"
+                    >
+                      <Plus className="h-3 w-3 mr-0.5" /> 添加
+                    </button>
                   </div>
-                )}
+                  {positions.length === 0 ? (
+                    <EmptyState
+                      icon={Bell}
+                      title="持仓 T 列表为空"
+                      hint="点击「添加」输入项目 symbol (300308.SZ / 00700.HK), 添加后启用即可开始日内监控。"
+                    />
+                  ) : (
+                    <div className="overflow-auto">
+                      {positions.map((p) => (
+                        <PositionRow
+                          key={p.symbol}
+                          symbol={p.symbol}
+                          name={p.name}
+                          enabled={p.enabled}
+                          active={p.symbol === selectedSymbol}
+                          dataStatus={p.data_status}
+                          onSelect={() => setSelectedSymbol(p.symbol)}
+                          onToggleEnabled={() => toggleEnabled.mutate({ symbol: p.symbol, enabled: !p.enabled })}
+                          onRemove={() => remove.mutate(p.symbol)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* 今日信号（下半）：全部标的的触发记录，按时间倒序；点击行跳转该标的详情 */}
+                <div className="bg-surface border border-border rounded-card flex flex-col overflow-hidden flex-1 min-h-0">
+                  <div className="flex items-center justify-between px-4 py-2 border-b border-border text-xs flex-shrink-0">
+                    <h2 className="text-sm font-medium text-foreground flex items-center gap-1.5">
+                      <BellRing className="h-3.5 w-3.5 text-accent" />
+                      今日信号 ({todaySignals.length})
+                    </h2>
+                  </div>
+                  <div className="overflow-auto">
+                    {todaySignals.length === 0 ? (
+                      <div className="px-3 py-4 text-xs text-muted">今日暂无信号</div>
+                    ) : (
+                      [...todaySignals]
+                        .sort((a, b) => b.ts_ms - a.ts_ms)
+                        .map((s, i) => {
+                          const t = new Date(s.ts_ms)
+                          const hhmmss = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}:${String(t.getSeconds()).padStart(2, '0')}`
+                          const buy = s.side !== 'sell'
+                          return (
+                            <button
+                              key={`${s.ts_ms}-${s.symbol}-${s.kind}-${i}`}
+                              onClick={() => setSelectedSymbol(s.symbol)}
+                              className="w-full text-left px-3 py-1.5 border-b border-line/30 last:border-b-0 hover:bg-accent/5 flex items-start gap-2 text-xs"
+                            >
+                              <span
+                                className={`flex-shrink-0 mt-0.5 px-1 rounded font-mono font-bold text-[10px] leading-4 ${
+                                  s.side === ''
+                                    ? 'bg-muted/40 text-muted'
+                                    : buy
+                                      ? 'bg-up/10 text-up'
+                                      : 'bg-down/10 text-down'
+                                }`}
+                              >
+                                {s.side === '' ? '·' : buy ? 'B' : 'S'}
+                              </span>
+                              <span className="min-w-0">
+                                <span className="font-medium">{s.name || s.symbol}</span>
+                                <span className="text-muted ml-1.5 font-mono">{hhmmss}</span>
+                                <span className="block text-muted truncate" title={s.detail}>{s.detail}</span>
+                              </span>
+                            </button>
+                          )
+                        })
+                    )}
+                  </div>
+                </div>
               </div>
 
               {/* 单票详情：直接复用 StockPanel（日K+分时）。
@@ -447,6 +525,7 @@ export function PositionTPage() {
                   height={560}
                   className="min-w-0"
                   refetchIntervalMs={intradayRefetchMs}
+                  tradeMarks={tradeMarks}
                 />
               ) : (
                 <EmptyState

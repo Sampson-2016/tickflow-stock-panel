@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2 } from 'lucide-react'
 import { api, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
-import { EChartsIntraday } from '@/components/EChartsIntraday'
+import { EChartsIntraday, type IntradayTradeMark } from '@/components/EChartsIntraday'
 
 interface Props {
   symbol: string
@@ -15,6 +15,8 @@ interface Props {
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
   currentPrice?: number
   priceLines?: { value: number; label?: string; color?: string }[]
+  /** T 信号 B/S 标记 (透传给 EChartsIntraday 主图散点)。 */
+  tradeMarks?: IntradayTradeMark[]
   /** 自动刷新间隔(ms)。undefined/0/false = 不轮询(默认)。个股对话框盘中实时刷新时传入。 */
   refetchIntervalMs?: number | false
   /**
@@ -89,6 +91,7 @@ export function StockIntradayChart({
   onPriceDoubleClick,
   currentPrice,
   priceLines,
+  tradeMarks,
   refetchIntervalMs,
   intradayKind,
 }: Props) {
@@ -167,6 +170,7 @@ export function StockIntradayChart({
             onPriceDoubleClick={onPriceDoubleClick}
             currentPrice={currentPrice}
             priceLines={priceLines}
+            tradeMarks={tradeMarks}
             tickMode
           />
         )}

@@ -265,6 +265,7 @@ class MockProvider(FreeRealtimeProvider):
             self._day_extremes[sym] = (trade_date, day_high, day_low)
             prev_close = base
             change_pct = (price - prev_close) / prev_close if prev_close else 0.0
+            vol_lots = float(self._rng.randint(1000, 100000))
             rows.append({
                 "symbol": sym,
                 "name": names.get(sym, sym),
@@ -275,8 +276,10 @@ class MockProvider(FreeRealtimeProvider):
                 "high": day_high,
                 "low": day_low,
                 "change_pct": change_pct,
-                "volume": float(self._rng.randint(1000, 100000)),
-                "amount": float(self._rng.randint(1000000, 100000000)),
+                # volume 单位为手; amount 必须与价格×成交量自洽 (元),
+                # 否则前端均价线 (Σamount/Σvolume股) 会算出离谱值 (如 -98% 偏离)
+                "volume": float(vol_lots),
+                "amount": float(price * vol_lots * 100),
                 "bid1_price": round(price - 0.01, 4),
                 "ask1_price": round(price + 0.01, 4),
                 "bid1_volume": float(self._rng.randint(100, 1000)),

@@ -3166,6 +3166,8 @@ export const api = {
         change_pct: number
         detail: string
         severity: 'high' | 'medium'
+        side?: 'buy' | 'sell' | ''
+        source?: string
       }>
       count: number
     }>(`/api/custom/t-signal/recent?${params.toString()}`)
@@ -3226,6 +3228,8 @@ export const api = {
         change_pct: number
         detail: string
         severity: 'high' | 'medium'
+        side?: 'buy' | 'sell' | ''
+        source?: string
       }>
       count: number
     }>(`/api/custom/t-signal/positions/${symbol}/signals?limit=${limit}`),
