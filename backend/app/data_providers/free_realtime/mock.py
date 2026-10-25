@@ -13,7 +13,8 @@ PR1 提供基础骨架，完整测试页逻辑（加速倍率/交易时段绕过
 from __future__ import annotations
 
 import random
-from datetime import datetime, time as dt_time, timedelta
+import time
+from datetime import date as _date, datetime, time as dt_time, timedelta
 
 import polars as pl
 
@@ -29,45 +30,57 @@ from app.markets import CN_TZ
 _DEFAULT_BASE_PRICE = 10.0
 # 价格围绕基准价的最大波动幅度（±10%），防止随机游走漂移到离谱价位
 _PRICE_BAND_PCT = 0.10
-# 日线收盘价缓存: symbol -> (date, last_close)
+# 「查无日线数据」负缓存 TTL（秒）：避免无日线标的每 tick 重复全量扫描
+_NEG_CACHE_TTL_SEC = 300.0
+# 日线收盘价缓存: symbol -> (date, last_close | None, expire_ts)
+# close=None 为负缓存（该标的查无数据），到 expire_ts 前直接返回 None
 _close_cache: dict[str, tuple] = {}
 
 
 def _resolve_last_close(symbol: str) -> float | None:
-    """取该标的日线数据中最后一个交易日的 raw_close（当日缓存）。
+    """取该标的日线数据中最后一个交易日的 raw_close（当日缓存 + 负缓存）。
 
     用于 mock 未配置 base_prices 时自动以真实最近收盘价为基准，
     避免 mock 价格（如 10 元）与真实股价（如 345 元）严重脱节。
-    取不到时返回 None（调用方兜底 _DEFAULT_BASE_PRICE）。
+    取不到时返回 None（调用方兜底 _DEFAULT_BASE_PRICE）；
+    「确认查无数据」会缓存 _NEG_CACHE_TTL_SEC 秒，repo 未就绪等瞬态
+    错误不缓存（下次重试）。
     """
     today = datetime.now(CN_TZ).date()
+    now_ts = time.time()
     cached = _close_cache.get(symbol)
-    if cached and cached[0] == today:
-        return cached[1]
-    fallback = cached[1] if cached else None
+    if cached:
+        cdate, close, expire_ts = cached
+        if close is not None and cdate == today:
+            return close
+        if close is None and now_ts < expire_ts:
+            return None
+    fallback = cached[1] if cached and cached[1] is not None else None
     try:
-        from datetime import date as _date, timedelta as _timedelta
-
         from app.main import app as _fastapp
 
         repo = getattr(_fastapp.state, "repo", None)
         if repo is None:
             return fallback
-        end = _date.today()
-        start = end - _timedelta(days=30)
+        end = today
+        start = end - timedelta(days=30)
         df = repo.get_daily(symbol, start, end, columns=["date", "raw_close"])
         if df.is_empty() or "raw_close" not in df.columns:
+            # 确认查无数据：写负缓存，避免每 tick 重复扫描
+            _close_cache[symbol] = (today, None, now_ts + _NEG_CACHE_TTL_SEC)
             return fallback
         vals = [
             v for v in df.sort("date")["raw_close"].to_list()
             if v is not None and v > 0
         ]
         if not vals:
+            _close_cache[symbol] = (today, None, now_ts + _NEG_CACHE_TTL_SEC)
             return fallback
         close = float(vals[-1])
-        _close_cache[symbol] = (today, close)
+        _close_cache[symbol] = (today, close, 0.0)
         return close
     except Exception:
+        # 瞬态错误（repo 未就绪等）不缓存，下次 tick 重试
         return fallback
 
 
@@ -104,6 +117,9 @@ class MockProvider(FreeRealtimeProvider):
         self._config: dict = dict(config) if config else {}
         self._rng = random.Random(self._config.get("seed"))
         self._current_prices: dict[str, float] = {}
+        # 日内高低价累计: symbol -> (trade_date, day_high, day_low)
+        # high/low 不只相对 base 单点计算，分时图日高日低与实际曲线一致
+        self._day_extremes: dict[str, tuple] = {}
         # 连续失败注入：剩余次数
         self._fail_remaining: int = 0
         # 虚拟时钟：若 start_time 配置则每次 get_realtime 推进一个 base interval
@@ -115,6 +131,7 @@ class MockProvider(FreeRealtimeProvider):
         self._config = dict(config)
         self._rng = random.Random(self._config.get("seed"))
         self._current_prices.clear()
+        self._day_extremes.clear()
         self._fail_remaining = 0
         self._init_mock_clock()
 
@@ -239,6 +256,13 @@ class MockProvider(FreeRealtimeProvider):
             if base is None or base <= 0:
                 base = _resolve_last_close(sym) or _DEFAULT_BASE_PRICE
             price = self._next_price(sym, base)
+            # 日内 high/low 累计（跨 tick、按交易日重置）
+            ext = self._day_extremes.get(sym)
+            if ext is None or ext[0] != trade_date:
+                day_high, day_low = max(price, base), min(price, base)
+            else:
+                day_high, day_low = max(price, ext[1]), min(price, ext[2])
+            self._day_extremes[sym] = (trade_date, day_high, day_low)
             prev_close = base
             change_pct = (price - prev_close) / prev_close if prev_close else 0.0
             rows.append({
@@ -248,8 +272,8 @@ class MockProvider(FreeRealtimeProvider):
                 "last_price": price,
                 "open": base,
                 "prev_close": prev_close,
-                "high": max(price, base),
-                "low": min(price, base),
+                "high": day_high,
+                "low": day_low,
                 "change_pct": change_pct,
                 "volume": float(self._rng.randint(1000, 100000)),
                 "amount": float(self._rng.randint(1000000, 100000000)),

@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import deque
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -22,6 +22,12 @@ from app.data_providers.free_realtime.schemas import (
     FREE_REALTIME_SCHEMA,
     empty_realtime_df,
 )
+from app.markets import CN_TZ
+
+
+def _today_cn() -> date:
+    """交易日口径统一用 Asia/Shanghai，避免非 CST 时区服务器跨午夜取错「今日」。"""
+    return datetime.now(CN_TZ).date()
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +154,7 @@ class RealtimeStore:
         """读取最近 N 个交易日的合并数据（用于前端分时图与回看）。"""
         if days <= 0:
             return empty_realtime_df()
-        today = date.today()
+        today = _today_cn()
         parts: list[pl.DataFrame] = []
         for i in range(days):
             d = today - timedelta(days=i)
@@ -162,7 +168,7 @@ class RealtimeStore:
     # ── 清理 ───────────────────────────────────────────────
     def prune(self, *, now_date: date | None = None) -> int:
         """惰性清理：删除超过 retention_days 的交易日目录。返回已删除的目录数。"""
-        now_date = now_date or date.today()
+        now_date = now_date or _today_cn()
         cutoff = now_date - timedelta(days=self._retention_days)
         removed = 0
         for kind in ("real", "mock"):

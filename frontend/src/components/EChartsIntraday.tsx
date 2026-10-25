@@ -2,18 +2,26 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { MinuteKlineRow, PriceLimitInfo } from '@/lib/api'
-import { computeIntradayAverage, formatMinuteTime, FULL_DAY_TIMES, FULL_DAY_TIMES_WITH_CALL } from '@/lib/intraday-chart'
+import {
+  buildPriceMarkLines,
+  computeIntradayAverage,
+  crosshairLabelStyle,
+  dashedCrosshairStyle,
+  formatMinuteTime,
+  FULL_DAY_TIMES,
+  FULL_DAY_TIMES_WITH_CALL,
+  intradayAreaStyle,
+  intradayGrids,
+  minuteDatetimeToMs,
+  volItemStyle,
+} from '@/lib/intraday-chart'
 import { useChartTheme, type ChartTheme } from '@/lib/theme'
 
 type YMode = 'adaptive' | 'limit'
 
-// 序列颜色 (双主题通用); 画布轴/网格/十字线等主题相关色走 ChartTheme
+// 均价线颜色 (双主题通用); 画布轴/网格/十字线等主题相关色走 ChartTheme
 const THEME = {
-  line: '#3B82F6',
-  areaFill: 'rgba(59,130,246,0.40)',
   avgLine: '#F59E0B',
-  volUp: 'rgba(240,68,56,0.6)',
-  volDown: 'rgba(18,183,106,0.6)',
 }
 
 interface Props {
@@ -89,35 +97,17 @@ function buildTickOption(
   priceLines: Props['priceLines'] = [],
   showCallAuction = true,
 ): EChartsOption {
-  // 把 datetime（如 "01:30:00Z" UTC）解析为当天分钟时间戳（毫秒）
-  // datetime 形如 "HH:mm:ssZ"，HH:mm:ss 是 UTC 时分秒（北京 09:15 → UTC 01:15）
-  // xAxis min/max 用 setHours(9,15) 是本地（北京）09:15 = UTC 01:15 = 当日 epoch
-  // 这里必须用 Date.UTC 构造 UTC 当日 h:min:sec 的 epoch，才能与 xAxis 范围对齐
-  const toMs = (datetime: string): number => {
-    const m = datetime.match(/^(\d{2}):(\d{2}):(\d{2})/)
-    if (!m) return 0
-    const h = parseInt(m[1], 10)
-    const min = parseInt(m[2], 10)
-    const sec = parseInt(m[3], 10)
-    const now = new Date()
-    return Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), h, min, sec)
-  }
-
+  // closePairs/avgPairs/volPairs 的时间戳与 xAxis min/max（Date.UTC 构造的当日
+  // 北京 09:15/09:30）对齐，详见 minuteDatetimeToMs
   const closePairs: [number, number][] = []
   const avgPairs: [number, number][] = []
   const volPairs: [number, number][] = []
-  const volNeutral = 'rgba(161,161,170,0.5)'
   for (let i = 0; i < data.length; i++) {
-    const ms = toMs(data[i].datetime)
+    const ms = minuteDatetimeToMs(data[i].datetime)
     closePairs.push([ms, data[i].close])
     avgPairs.push([ms, avgPrices[i]])
     volPairs.push([ms, data[i].volume])
   }
-
-  const lastClose = data.length > 0 ? data[data.length - 1].close : null
-  const lineIsUp = lastClose != null && prevClose != null ? lastClose > prevClose : true
-  // A 股：涨红跌绿；这里只用主色（蓝色），着色逻辑由 areaStyle + markLine 完成
-  void lineIsUp // 暂留，后续可按需切色
 
   const allValues: number[] = []
   if (prevClose != null) allValues.push(prevClose)
@@ -129,46 +119,8 @@ function buildTickOption(
   const yMinAdj = yMin - yPad
   const yMaxAdj = yMax + yPad
 
-  const areaStyle: any = {
-    color: {
-      type: 'linear',
-      x: 0, y: 0, x2: 0, y2: 1,
-      colorStops: [
-        { offset: 0, color: areaColor },
-        { offset: 1, color: 'rgba(0,0,0,0)' },
-      ],
-    },
-  }
-
   // 涨跌停 markLine（仅在 limit 模式下显示，与 buildOption 行为一致）
-  const markLineData: any[] = []
-  if (prevClose != null) {
-    markLineData.push({
-      yAxis: prevClose,
-      lineStyle: { color: ct.crosshair, type: 'dashed', width: 1 },
-      label: { show: false },
-      symbol: 'none',
-    })
-  }
-  for (const line of priceLines) {
-    if (!Number.isFinite(line.value) || line.value <= 0) continue
-    markLineData.push({
-      yAxis: line.value,
-      lineStyle: { color: line.color ?? ct.text, type: 'dashed', width: 1, opacity: 0.92 },
-      label: {
-        show: !!line.label,
-        formatter: line.label ?? '',
-        position: 'insideEndTop',
-        color: line.color ?? ct.text,
-        backgroundColor: ct.tooltipBg,
-        borderRadius: 4,
-        padding: [2, 6],
-        fontSize: 10,
-        fontFamily: 'JetBrains Mono, monospace',
-      },
-      symbol: 'none',
-    })
-  }
+  const markLineData = buildPriceMarkLines(prevClose, priceLines, ct.crosshair, ct.text, ct.tooltipBg)
 
   const series: any[] = [
     {
@@ -179,7 +131,7 @@ function buildTickOption(
       symbol: 'none',
       cursor: 'crosshair',
       lineStyle: { width: 1.2, color: lineColor },
-      areaStyle,
+      areaStyle: intradayAreaStyle(areaColor),
       // tick 模式下不要 connectNulls，让 echarts 在 gap 处断开
       connectNulls: false,
       markLine: markLineData.length > 0 ? { symbol: 'none', data: markLineData, animation: false, silent: true } : undefined,
@@ -207,9 +159,7 @@ function buildTickOption(
     barMinWidth: 1,
     data: volPairs.map(([t, v], i) => ({
       value: [t, v],
-      itemStyle: {
-        color: data[i].close > data[i].open ? THEME.volUp : data[i].close < data[i].open ? THEME.volDown : volNeutral,
-      },
+      itemStyle: { color: volItemStyle(data[i].close, data[i].open) },
     })),
   })
 
@@ -220,17 +170,14 @@ function buildTickOption(
       axisPointer: { type: 'cross' },
     },
     axisPointer: { link: [{ xAxisIndex: 'all' }] },
-    grid: [
-      { left: 60, right: 55, top: 24, bottom: '34%' },
-      { left: 60, right: 55, top: '69%', bottom: 20 },
-    ],
+    grid: intradayGrids(),
     xAxis: [
       {
         type: 'time',
         // x 轴范围：showCallAuction 时从 9:15 开始（含集合竞价），否则从 9:30 开始
         min: (() => {
           const d = new Date()
-          d.setHours(showCallAuction ? 9 : 9, showCallAuction ? 15 : 30, 0, 0)
+          d.setHours(9, showCallAuction ? 15 : 30, 0, 0)
           return d.getTime()
         })(),
         max: (() => { const d = new Date(); d.setHours(15, 0, 0, 0); return d.getTime() })(),
@@ -245,8 +192,8 @@ function buildTickOption(
         })(),
         axisPointer: {
           show: true,
-          lineStyle: { color: ct.crosshair, type: 'dashed', width: 1 },
-          label: { show: true, backgroundColor: ct.tooltipBg, borderColor: ct.tooltipBorder, borderWidth: 1, padding: [2, 4], color: ct.tooltipText, fontSize: 10, fontFamily: 'JetBrains Mono, monospace' },
+          lineStyle: dashedCrosshairStyle(ct.crosshair),
+          label: crosshairLabelStyle(ct.tooltipBg, ct.tooltipBorder, ct.tooltipText),
         },
         axisLine: { show: false },
         axisLabel: {
@@ -273,7 +220,7 @@ function buildTickOption(
         gridIndex: 1,
         min: (() => {
           const d = new Date()
-          d.setHours(showCallAuction ? 9 : 9, showCallAuction ? 15 : 30, 0, 0)
+          d.setHours(9, showCallAuction ? 15 : 30, 0, 0)
           return d.getTime()
         })(),
         max: (() => { const d = new Date(); d.setHours(15, 0, 0, 0); return d.getTime() })(),
@@ -335,7 +282,6 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
   const avgData = new Array(times.length).fill(null) as (number | null)[]
   const volumes = new Array(times.length).fill(null) as (any | null)[]
 
-  const volNeutral = 'rgba(161,161,170,0.5)'
   for (let i = 0; i < data.length; i++) {
     const timeKey = formatMinuteTime(data[i].datetime)
     const idx = timeIndexMap.get(timeKey)
@@ -346,52 +292,12 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       avgData[idx] = avgPrices[i]
       volumes[idx] = {
         value: data[i].volume,
-        itemStyle: {
-          color: data[i].close > data[i].open ? THEME.volUp : data[i].close < data[i].open ? THEME.volDown : volNeutral,
-        },
+        itemStyle: { color: volItemStyle(data[i].close, data[i].open) },
       }
     }
   }
 
-  const areaStyle: any = {
-    color: {
-      type: 'linear',
-      x: 0, y: 0, x2: 0, y2: 1,
-      colorStops: [
-        { offset: 0, color: areaColor },
-        { offset: 1, color: 'rgba(0,0,0,0)' },
-      ],
-    },
-  }
-
-  const markLineData: any[] = []
-  if (prevClose != null) {
-    markLineData.push({
-      yAxis: prevClose,
-      lineStyle: { color: ct.crosshair, type: 'dashed', width: 1 },
-      label: { show: false },
-      symbol: 'none',
-    })
-  }
-  for (const line of priceLines) {
-    if (!Number.isFinite(line.value) || line.value <= 0) continue
-    markLineData.push({
-      yAxis: line.value,
-      lineStyle: { color: line.color ?? ct.text, type: 'dashed', width: 1, opacity: 0.92 },
-      label: {
-        show: !!line.label,
-        formatter: line.label ?? '',
-        position: 'insideEndTop',
-        color: line.color ?? ct.text,
-        backgroundColor: ct.tooltipBg,
-        borderRadius: 4,
-        padding: [2, 6],
-        fontSize: 10,
-        fontFamily: 'JetBrains Mono, monospace',
-      },
-      symbol: 'none',
-    })
-  }
+  const markLineData = buildPriceMarkLines(prevClose, priceLines, ct.crosshair, ct.text, ct.tooltipBg)
 
   let yMin: number | undefined
   let yMax: number | undefined
@@ -487,17 +393,14 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
           fontSize: 10,
           fontFamily: 'JetBrains Mono, monospace',
         },
-        crossStyle: { color: ct.crosshair, type: 'dashed', width: 1 },
-        lineStyle: { color: ct.crosshair, type: 'dashed', width: 1 },
+        crossStyle: dashedCrosshairStyle(ct.crosshair),
+        lineStyle: dashedCrosshairStyle(ct.crosshair),
       },
     },
     axisPointer: {
       link: [{ xAxisIndex: 'all' }],
     },
-    grid: [
-      { left: 60, right: 55, top: 24, bottom: '34%' },
-      { left: 60, right: 55, top: '69%', bottom: 20 },
-    ],
+    grid: intradayGrids(),
     xAxis: [
       {
         type: 'category',
@@ -505,19 +408,10 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         boundaryGap: false,
         axisPointer: {
           show: true,
-          lineStyle: { color: ct.crosshair, type: 'dashed', width: 1 },
+          lineStyle: dashedCrosshairStyle(ct.crosshair),
           label: {
-            show: true,
-            backgroundColor: ct.tooltipBg,
-            borderColor: ct.tooltipBorder,
-            borderWidth: 1,
-            padding: [2, 4],
-            color: ct.tooltipText,
-            fontSize: 10,
-            fontFamily: 'JetBrains Mono, monospace',
-            formatter: (params: any) => {
-              return params.value ?? ''
-            },
+            ...crosshairLabelStyle(ct.tooltipBg, ct.tooltipBorder, ct.tooltipText),
+            formatter: (params: any) => params.value ?? '',
           },
         },
         axisLine: { show: false },
@@ -624,7 +518,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         lineStyle: { width: 1.2, color: lineColor },
         // tick 模式：禁用 areaStyle，避免单点被 echarts 拉满到 x 轴末端
         // （category 轴 + areaStyle 会把 1 个点的面积填充到整条 x 轴宽度）
-        areaStyle: tickMode ? undefined : areaStyle,
+        areaStyle: tickMode ? undefined : intradayAreaStyle(areaColor),
         // 关闭 connectNulls：tick 视图下只画已发生分钟点，
         // 不用直线把 null 间隙连接起来（否则只有 1 个点时会从 9:30 拉直线到 14:57）
         connectNulls: false,
@@ -678,6 +572,9 @@ export function EChartsIntraday({
   const priceDoubleClickHandlerRef = useRef<((event: { offsetX: number; offsetY: number }) => void) | null>(null)
   const dataRef = useRef(data)
   dataRef.current = data
+  // tick 模式 ref：updateAxisPointer 回调读取（避免重建 chart）
+  const tickModeRef = useRef(tickMode)
+  tickModeRef.current = tickMode
   const currentPriceRef = useRef(currentPrice)
   currentPriceRef.current = currentPrice
   const onPriceHoverRef = useRef(onPriceHover)
@@ -720,7 +617,10 @@ export function EChartsIntraday({
       // 强制 canvas 使用十字光标，覆盖 ECharts 默认的 pointer
       const forceCursor = () => {
         const canvases = el.querySelectorAll('canvas')
-        canvases.forEach(c => { c.style.setProperty('cursor', 'crosshair', 'important') })
+        canvases.forEach(c => {
+          // 值未变时跳过写操作，避免触发 MutationObserver 反馈循环
+          if (c.style.cursor !== 'crosshair') c.style.setProperty('cursor', 'crosshair', 'important')
+        })
       }
       forceCursor()
       // MutationObserver: ECharts 内部可能重建/修改 canvas 属性，持续强制 cursor
@@ -739,11 +639,30 @@ export function EChartsIntraday({
         for (const info of Object.values(axesInfo)) {
           const val = (info as any)?.value
           if (val == null) continue
+          const d = dataRef.current
+          if (tickModeRef.current) {
+            // time 轴（tick 模式）：info.value 是毫秒时间戳而非 category 索引，
+            // 按时间戳找最近的数据行（数据 ≤ 全天分钟数，线性扫描即可）
+            if (typeof val !== 'number' || !Number.isFinite(val)) continue
+            let nearest = -1
+            let nearestDiff = Infinity
+            for (let i = 0; i < d.length; i++) {
+              const diff = Math.abs(minuteDatetimeToMs(d[i].datetime) - val)
+              if (diff < nearestDiff) {
+                nearestDiff = diff
+                nearest = i
+              }
+            }
+            if (nearest >= 0) {
+              setInfoIdx(nearest)
+              onPriceHoverRef.current?.(d[nearest].close)
+            }
+            return
+          }
           const fullDayIdx = typeof val === 'number' ? val : -1
           if (fullDayIdx >= 0) {
             const dataIdx = fullDayToDataIdx.current.get(fullDayIdx) ?? -1
             setInfoIdx(dataIdx)
-            const d = dataRef.current
             if (dataIdx >= 0 && dataIdx < d.length) {
               onPriceHoverRef.current?.(d[dataIdx].close)
             }
@@ -787,7 +706,7 @@ export function EChartsIntraday({
     } else {
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, times])
+  }, [data, prevClose, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, times, tickMode])
 
   useEffect(() => {
     return () => {

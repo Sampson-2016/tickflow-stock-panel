@@ -16,6 +16,7 @@ import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
 import { buildMonitorPriceLines } from '@/lib/price-alerts'
 import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 import { setFocusSymbol, clearFocusSymbol } from '@/lib/useQuoteStream'
+import { useFreeRealtimeSchedulerStatus, useFreeRealtimeTestStatus } from '@/custom/free_realtime/hooks'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { storage } from '@/lib/storage'
 import { ExtensionSlot } from '@/extensions/ExtensionSlot'
@@ -167,22 +168,9 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
   // 便于用户在测试页打开数据源后, 直接看到分时图持续生成。
   const { data: prefs } = usePreferences()
   const { data: quoteStatus } = useQuoteStatus()
-  const { data: frStatus } = useQuery({
-    queryKey: ['free-realtime', 'status'] as const,
-    queryFn: api.freeRealtimeStatus,
-    refetchInterval: (q) => {
-      const d = q.state.data
-      return d && (d.running || false) ? 5000 : 15000
-    },
-  })
-  const { data: frTestStatus } = useQuery({
-    queryKey: ['free-realtime-test', 'status'] as const,
-    queryFn: api.freeRealtimeTestStatus,
-    refetchInterval: (q) => {
-      const d = q.state.data
-      return d && (d.mock_running || d.real_loop_running) ? 3000 : 15000
-    },
-  })
+  // 该组件常驻挂载于多个页面，无 symbol 时禁用查询，避免无谓轮询
+  const { data: frStatus } = useFreeRealtimeSchedulerStatus(!!symbol)
+  const { data: frTestStatus } = useFreeRealtimeTestStatus(!!symbol)
   const realtimeRunning = quoteStatus?.running ?? false
   const intradayRefreshOn = prefs?.minute_intraday_refresh ?? false
   const frTestRunning = !!(frTestStatus?.mock_running || frTestStatus?.real_loop_running)
@@ -499,7 +487,9 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   symbol={symbol}
                   height={420}
                   showIntraday
-                  intradayKind="real"
+                  // 仅当免费实时行情调度器/测试循环运行时才走 tick 路径，
+                  // 否则保持 undefined 走 klineMinute 历史分钟K
+                  intradayKind={frStatus?.running || frTestRunning ? 'real' : undefined}
                   dateRange={dateRange}
                   priceLines={monitorPriceLines}
                   onPriceDoubleClick={openPriceAlert}

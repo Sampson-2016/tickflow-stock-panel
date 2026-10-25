@@ -14,11 +14,10 @@ import {
   TrendingDown,
   TrendingUp,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { EmptyState } from '@/components/EmptyState'
 import { StockPanel } from '@/components/StockPanel'
 import { toast } from '@/components/Toast'
-import { api } from '@/lib/api'
 import { AddPositionDialog } from '@/custom/easyquotation_t_signal/AddPositionDialog'
 import { OoReportSection } from './OoReportSection'
 import {
@@ -33,11 +32,11 @@ import {
   type FreeRealtimeOverboughtSymbol,
   type FreeRealtimeStatus,
 } from './api'
+import { FR_STATUS_KEY, useFreeRealtimeSchedulerStatus, useFreeRealtimeTestStatus } from './hooks'
 
 const QK = ['free-realtime-overbought'] as const
 const symbolsKey = () => [...QK, 'symbols'] as const
 const signalsKey = () => [...QK, 'signals'] as const
-const statusKey = () => [...QK, 'status'] as const
 
 export function OverboughtOversoldPage() {
   const qc = useQueryClient()
@@ -48,22 +47,11 @@ export function OverboughtOversoldPage() {
   // 数据源视图：real 真实行情 / mock 测试页虚拟行情（mock 运行中才可切）
   const [dataSource, setDataSource] = useState<'real' | 'mock'>('real')
 
-  // 调度器状态（用于分时图持续刷新）
-  const statusQ = useQuery({
-    queryKey: statusKey(),
-    queryFn: freeRealtimeApi.status,
-    refetchInterval: (q) => (q.state.data?.running ? 5000 : 15000),
-  })
+  // 调度器状态（用于分时图持续刷新）；queryKey 与配置页/弹窗统一为 ['free-realtime','status']
+  const statusQ = useFreeRealtimeSchedulerStatus()
   // 测试页 mock/真实循环运行时也强制刷新分时图
   // 运行时 3s 高频；停止时 15s 低频仅用于感知启动
-  const frTestStatusQ = useQuery({
-    queryKey: ['free-realtime-test', 'status'] as const,
-    queryFn: api.freeRealtimeTestStatus,
-    refetchInterval: (q) => {
-      const d = q.state.data
-      return d && (d.mock_running || d.real_loop_running) ? 3000 : 15000
-    },
-  })
+  const frTestStatusQ = useFreeRealtimeTestStatus()
 
   // 候选标的列表（持仓T + 自选股）
   const symbolsQ = useQuery({
@@ -86,9 +74,7 @@ export function OverboughtOversoldPage() {
     mutationFn: ({ symbol, enabled }: { symbol: string; enabled: boolean }) =>
       freeRealtimeApi.overboughtSymbolToggle(symbol, enabled),
     onSuccess: () => qc.invalidateQueries({ queryKey: symbolsKey() }),
-    onError: (e: Error) => {
-      console.error('toggle overbought symbol failed', e)
-    },
+    onError: (e: Error) => toast(e.message, 'error'),
   })
 
   const addMut = useMutation({
@@ -97,13 +83,13 @@ export function OverboughtOversoldPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: symbolsKey() })
     },
-    onError: (e: Error) => console.error('add overbought symbol failed', e),
+    onError: (e: Error) => toast(e.message, 'error'),
   })
 
   const deleteMut = useMutation({
     mutationFn: (symbol: string) => freeRealtimeApi.overboughtSymbolDelete(symbol),
     onSuccess: () => qc.invalidateQueries({ queryKey: symbolsKey() }),
-    onError: (e: Error) => console.error('delete overbought symbol failed', e),
+    onError: (e: Error) => toast(e.message, 'error'),
   })
 
   const status = statusQ.data
@@ -117,6 +103,13 @@ export function OverboughtOversoldPage() {
   const symbols = symbolsQ.data?.items ?? []
   const signals = signalsQ.data?.items ?? []
   const moduleEnabled = !!status?.modules?.overbought_oversold
+
+  // mock 循环停止后自动切回真实数据源，避免停在无数据的 mock 视图
+  useEffect(() => {
+    if (dataSource === 'mock' && !frTestStatusQ.data?.mock_running) {
+      setDataSource('real')
+    }
+  }, [dataSource, frTestStatusQ.data])
 
   // 信号按 symbol 索引，便于列表加徽章
   const signalBySymbol = useMemo(() => {
@@ -542,16 +535,16 @@ function ConfigSection({ status }: { status: FreeRealtimeStatus }) {
   const toggleModuleMut = useMutation({
     mutationFn: (enabled: boolean) =>
       freeRealtimeApi.putConfig({ modules: { overbought_oversold: enabled } }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: statusKey() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: FR_STATUS_KEY }),
   })
 
   const startMut = useMutation({
     mutationFn: freeRealtimeApi.start,
-    onSuccess: () => qc.invalidateQueries({ queryKey: statusKey() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: FR_STATUS_KEY }),
   })
   const stopMut = useMutation({
     mutationFn: freeRealtimeApi.stop,
-    onSuccess: () => qc.invalidateQueries({ queryKey: statusKey() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: FR_STATUS_KEY }),
   })
 
   return (

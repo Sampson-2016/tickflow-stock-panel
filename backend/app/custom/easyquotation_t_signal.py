@@ -14,6 +14,13 @@ L2 扩展: 文件落在 backend/app/custom/, 由 app.extensions.loader 自动发
 历史说明: 原 easyquotation 拉取路径已移除（2026-10-25），持仓 T 仅由
 统一行情驱动（real 主调度器 + mock 测试页循环注入），目录/扩展 ID
 保留原名仅为兼容前端 import 路径与扩展注册 ID。
+
+已知限制:
+  - 统一行情 provider 暂无港股源；.HK 标的的评估逻辑保留（单测覆盖），
+    但运行期不会有数据喂入，add() 时会打告警。
+  - POST /start 保留为「统一行情不可用时的手动兜底自轮询」路径，
+    正常情况应由调度器回调 (on_realtime_df) 驱动，两者勿同时使用
+    （同标的会重复请求外部行情源，仅靠 cooldown 去重信号、不去重请求）。
 """
 from __future__ import annotations
 
@@ -41,6 +48,7 @@ from app.extensions import (  # noqa: E402
     ExtensionContext,
 )
 from app.markets import is_trading_now, market_of  # noqa: E402
+from app.services.free_realtime import config as fr_config  # noqa: E402
 
 # ================================================================
 # 配置
@@ -219,10 +227,7 @@ class QuoteFetcher:
         out: dict[str, dict[str, Any]] = {}
         try:
             # 轮换源在主调度器已做；此兼容路径直接用首个勾选源
-            sources = __import__(
-                "app.services.free_realtime.config", fromlist=["get_sources"]
-            ).get_sources()
-            source = sources[0] if sources else "sina"
+            source = fr_config.get_sources()[0] if fr_config.get_sources() else "sina"
             df = get_provider(source).get_realtime(symbols)
         except Exception as e:
             self.last_error = f"free_realtime fetch failed: {e}"
@@ -243,6 +248,15 @@ class QuoteFetcher:
 # ================================================================
 # 评估器: 三件套规则
 # ================================================================
+
+def _safe_float(value: Any) -> float | None:
+    """宽松转 float；None/非法/NaN/inf 一律返回 None（模块级，供 evaluator 与 store 共用）。"""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and abs(f) != float("inf") else None
+
 
 class SignalEvaluator:
     """从原始 quote 评估三件套信号。
@@ -276,11 +290,8 @@ class SignalEvaluator:
 
     @staticmethod
     def _safe_float(value: Any) -> float | None:
-        try:
-            f = float(value)
-        except (TypeError, ValueError):
-            return None
-        return f if f == f and abs(f) != float("inf") else None  # NaN / inf 排除
+        # 委托模块级实现，保持 self._safe_float 调用兼容
+        return _safe_float(value)
 
     def evaluate(
         self,
@@ -615,6 +626,14 @@ class PositionTStore:
             raise ValueError("symbol 不能为空")
         if not is_supported_symbol(sym):
             raise ValueError(f"不支持的市场或格式: {sym} (本模块仅支持 A 股 / 港股)")
+        if is_hk_stock(sym):
+            # 统一行情通道（free_realtime provider）暂无港股源，.HK 标的会一直
+            # 停在 data_status=failed；这里显式告警而非静默失败。
+            logger.warning(
+                "t-signal: %s 为港股，统一行情通道暂不支持港股行情，"
+                "该标的将无法产生信号（评估逻辑保留，待接入港股源后生效）",
+                sym,
+            )
         with self._lock:
             for e in self._entries:
                 if e.symbol == sym:
@@ -683,7 +702,8 @@ class IntradayKlineStore:
 
     设计要点:
       - 不依赖项目 TickFlow 分钟 K (kline_minute parquet); 用户用免费行情时也能用。
-      - 每轮 poll 后由 poller 写入新点; UI 详情页读此缓存画日内图 + 信号标注。
+      - 数据点由统一行情驱动链路写入 (on_realtime_df / _tick)；同分钟覆盖
+        (行情 volume 是全日累计量, 覆盖为正确行为)。
       - 仅保留当日数据: 凌晨 0 点清空 (进程持续运行也能跨日); 进程重启后清空。
     """
 
@@ -790,6 +810,8 @@ class TSignalPoller:
         self._positions = PositionTStore()
         self._intraday = IntradayKlineStore()
         self._pusher = FeishuPusher()
+        # 今日信号计数会被内部轮询线程与调度器线程并发读写，用锁保护
+        self._signals_lock = threading.Lock()
         self._signals_today = 0
         self._signals_today_date = ""
 
@@ -806,15 +828,26 @@ class TSignalPoller:
     def signal_store(self) -> SignalStore:
         return self._store
 
+    def _count_signals(self, n: int) -> None:
+        """今日信号计数（跨日重置），线程安全。"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        with self._signals_lock:
+            if self._signals_today_date != today:
+                self._signals_today_date = today
+                self._signals_today = 0
+            self._signals_today += n
+
     def status(self) -> dict[str, Any]:
         cfg = load_config()
         all_positions = self._positions.list_all()
+        with self._signals_lock:
+            signals_today = self._signals_today
         return {
             "running": self._running,
             "interval_sec": cfg["interval_sec"],
             "last_fetch_ms": round(self._fetcher.last_fetch_ms, 0),
             "last_fetch_error": self._fetcher.last_error,
-            "signals_today": self._signals_today,
+            "signals_today": signals_today,
             "position_count": len(all_positions),
             "enabled_position_count": sum(1 for p in all_positions if p.get("enabled")),
             "auto_push_to_feishu": cfg["auto_push_to_feishu"],
@@ -895,7 +928,7 @@ class TSignalPoller:
             return  # 整批失败, 但 mark_tick_result 已记录失败状态, 可以 return
 
         # ── 攒日内 K: 每个标的最后一个价格作为最新点 ──
-        # 同一分钟内的多次拉取合并到同一个 bar (volume 累加), 与 _store 同模式
+        # 同一分钟内的多次拉取覆盖到同一个 bar（volume 为全日累计量，覆盖即最新），与 _store 同模式
         for sym, raw in quotes.items():
             now_price = self._safe_float(raw.get("now"))
             if now_price is None and sym.endswith(".HK"):
@@ -915,11 +948,7 @@ class TSignalPoller:
                 self._store.append(s)
 
         # 今日计数
-        today = datetime.now().strftime("%Y-%m-%d")
-        if self._signals_today_date != today:
-            self._signals_today_date = today
-            self._signals_today = 0
-        self._signals_today += len(accepted)
+        self._count_signals(len(accepted))
 
         # 推送 (异步 fire-and-forget; 受 auto_push_to_feishu 控制)
         if accepted and cfg["auto_push_to_feishu"]:
@@ -940,12 +969,7 @@ class TSignalPoller:
         cfg = load_config()
         # 与 _tick 不同：trading_hours_only 由统一调度器负责，此处不再二次过滤
         # 仅校验：统一行情模块下 position_t 全局开关必须开启
-        try:
-            from app.services.free_realtime import config as fr_config
-
-            if not fr_config.get_module_enabled("position_t"):
-                return
-        except Exception:
+        if not fr_config.get_module_enabled("position_t"):
             return
 
         # 转换：标准化 DataFrame → {symbol: raw_dict}（与 _tick 输入格式一致）
@@ -986,8 +1010,8 @@ class TSignalPoller:
         )
         # 日内 K 攒点（与 _tick 同模式：同分钟覆盖）
         for sym, raw in quotes.items():
-            now_price = self._evaluator._safe_float(raw.get("now"))
-            volume = self._evaluator._safe_float(raw.get("volume"))
+            now_price = _safe_float(raw.get("now"))
+            volume = _safe_float(raw.get("volume"))
             if now_price is not None:
                 self._intraday.append(sym, now_ms, now_price, volume)
 
@@ -1003,11 +1027,8 @@ class TSignalPoller:
                 accepted.append(s)
                 self._store.append(s)
 
-        today = datetime.now().strftime("%Y-%m-%d")
-        if self._signals_today_date != today:
-            self._signals_today_date = today
-            self._signals_today = 0
-        self._signals_today += len(accepted)
+        # 今日计数
+        self._count_signals(len(accepted))
 
         if accepted and cfg["auto_push_to_feishu"]:
             self._pusher.push(accepted)

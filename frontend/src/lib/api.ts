@@ -3390,6 +3390,7 @@ export const api = {
         seed: number
         interval_seconds: number
         acceleration: number
+        start_time?: string
       }
       running: boolean
       accelerations: number[]

@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -23,6 +24,7 @@ from app.extensions import (
     BackendExtensionRegistrar,
     ExtensionContext,
 )
+from app.markets import CN_TZ
 from app.services.free_realtime import config as fr_config
 from app.services.free_realtime import scheduler as fr_scheduler
 
@@ -65,7 +67,12 @@ def put_config(payload: ConfigIn) -> dict:
             fr_config.set_trading_hours_only(payload.trading_hours_only)
         if payload.retention_days is not None:
             fr_config.set_retention_days(payload.retention_days)
-        if payload.overbought_pct is not None and payload.oversold_pct is not None:
+        if payload.overbought_pct is not None or payload.oversold_pct is not None:
+            if payload.overbought_pct is None or payload.oversold_pct is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="overbought_pct 与 oversold_pct 必须成对传递",
+                )
             fr_config.set_overbought_thresholds(payload.overbought_pct, payload.oversold_pct)
         if payload.modules is not None:
             for mod, flag in payload.modules.items():
@@ -112,12 +119,12 @@ def get_intraday(symbol: str, kind: str = "real", days: int = 1) -> dict:
     """
     if kind not in ("real", "mock"):
         raise HTTPException(status_code=400, detail="kind must be real/mock")
-    from datetime import date as _date
-
     sym = symbol.strip().upper()
     scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
     if days <= 1:
-        df = scheduler.store().list_day(sym, _date.today(), kind=kind)
+        df = scheduler.store().list_day(
+            sym, datetime.now(CN_TZ).date(), kind=kind
+        )
     else:
         df = scheduler.store().list_recent_days(sym, days=min(int(days), 30), kind=kind)
     return {
@@ -158,6 +165,14 @@ class OverboughtSymbolThresholdsIn(BaseModel):
     oversold_pct: float | None = None
 
 
+def _ensure_oo_symbol(sym: str, items: list[dict]) -> None:
+    """校验 symbol 在超买超卖清单中，不存在则 404（避免静默成功）。"""
+    if not any(it.get("symbol") == sym for it in items):
+        raise HTTPException(
+            status_code=404, detail=f"symbol {sym} not in overbought list"
+        )
+
+
 @router.post("/overbought-oversold/symbols")
 def post_overbought_oversold_symbol(payload: OverboughtSymbolIn) -> dict:
     """添加一个标的到超买超卖清单。
@@ -188,6 +203,7 @@ def put_overbought_oversold_symbol(symbol: str, payload: OverboughtSymbolToggleI
     if not sym:
         raise HTTPException(status_code=400, detail="symbol required")
     items = fr_config.set_overbought_symbol_enabled(sym, bool(payload.enabled))
+    _ensure_oo_symbol(sym, items)
     return {"symbol": sym, "enabled": bool(payload.enabled), "items": items}
 
 
@@ -205,6 +221,7 @@ def put_overbought_oversold_symbol_thresholds(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    _ensure_oo_symbol(sym, items)
     return {"symbol": sym, "items": items}
 
 
@@ -424,12 +441,7 @@ def get_mock_config() -> dict:
 def get_collect_symbols() -> dict:
     """返回三个模块当前已启用的标的列表（mock 与真实循环共用）。"""
     scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
-    symbols: list[str] = []
-    if scheduler._collector is not None:
-        try:
-            symbols = scheduler._collector.collect()
-        except Exception as e:
-            logger.warning("collect-symbols failed: %s", e)
+    symbols = scheduler.collect_symbols()
     return {"symbols": symbols, "running_mock": _test_state["mock_running"], "running_real": _test_state["real_loop_running"]}
 
 
@@ -462,6 +474,11 @@ def put_mock_config(payload: MockConfigIn) -> dict:
                 raise HTTPException(
                     status_code=400,
                     detail=f"start_time must be in {list(_ALLOWED_START_TIMES)}",
+                )
+            if _test_state["mock_running"] and raw != cfg.get("start_time"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="mock 运行中不允许修改 start_time（会打断时间轴），请先停止",
                 )
             cfg["start_time"] = raw
         _test_state["config"] = cfg
@@ -590,14 +607,16 @@ def _mock_loop() -> None:
     # start_time 仅作为 mock 时钟起点。如果 start_time > 09:15（如 10:00），
     # 先 backfill 9:15 → start_time 段（一气呵成、不睡眠），再进入 1-tick-per-interval 流式。
     interval_sec = max(1, int(fr_config.get_interval_sec()))
+    # 先初始化兜底值：except 分支会引用，避免 NameError 杀死 mock 线程
+    now_real = datetime.now(CN_TZ)
+    today_0915 = datetime(
+        now_real.year, now_real.month, now_real.day, 9, 15, tzinfo=CN_TZ
+    )
+    mock_start = today_0915
     try:
         with _test_state["lock"]:
             cfg = dict(_test_state["config"])
         start_raw = cfg.get("start_time")
-        now_real = datetime.now(CN_TZ)
-        today_0915 = datetime(
-            now_real.year, now_real.month, now_real.day, 9, 15, tzinfo=CN_TZ
-        )
         if start_raw:
             h, m = str(start_raw).strip().split(":")
             t_start = dt_time(int(h), int(m))
@@ -605,23 +624,17 @@ def _mock_loop() -> None:
                 now_real.year, now_real.month, now_real.day,
                 t_start.hour, t_start.minute, tzinfo=CN_TZ,
             )
-        else:
-            mock_start = today_0915
     except Exception as e:
         logger.warning("mock clock init failed: %s", e)
-        # 兜底：直接进入流式（不 backfill），clock 由 provider 默认值决定
         mock_start = today_0915
 
     # ── 接口 1：backfill 9:15 → start_time（一气呵成） ─
     # 仅当 start_time > 09:15 时回放，避免起点本身在 09:15 的无意义回放。
     # backfill 后 mock_clock 停在 mock_start - interval_sec，留给流式接管。
+    symbols_bf: list[str] = []  # 启动 backfill 覆盖的标的（显式变量，不用 NameError 判分支）
     try:
         if mock_start > today_0915:
-            try:
-                symbols_bf = scheduler._collector.collect() if scheduler._collector else []
-            except Exception as e:
-                logger.warning("mock backfill collector failed: %s", e)
-                symbols_bf = []
+            symbols_bf = scheduler.collect_symbols()
             if symbols_bf:
                 bf_df = provider.backfill(
                     symbols_bf, today_0915, mock_start, float(interval_sec)
@@ -629,14 +642,13 @@ def _mock_loop() -> None:
                 if not bf_df.is_empty():
                     scheduler.store().append(bf_df, kind="mock")
                     with _test_state["lock"]:
-                        # tick_count 按"每 symbol 一行"计数（与流式循环口径一致）
-                        added = bf_df.height // max(1, len(symbols_bf))
-                        _test_state["tick_count"] += added
-                        _test_state["mock_tick_count"] += added
+                        # tick_count 口径 = 标的×tick 行数（与流式循环一致）
+                        _test_state["tick_count"] += bf_df.height
+                        _test_state["mock_tick_count"] += bf_df.height
                         _test_state["last_tick_ms"] = _latest_ts_ms(bf_df)
                     logger.info(
                         "mock backfill: %d ticks from %s to %s",
-                        bf_df.height // max(1, len(symbols_bf)),
+                        bf_df.height,
                         today_0915.strftime("%H:%M:%S"),
                         mock_start.strftime("%H:%M:%S"),
                     )
@@ -651,12 +663,7 @@ def _mock_loop() -> None:
     # ── 接口 2：1-tick-per-interval 流式生成 ─
     # 已 backfill 过的标的集合：mock 运行中新加入的标的（三个模块开关/清单变化）
     # 需要增量补抓 9:15 → 当前虚拟时钟 段，否则新标的分时图前段为空。
-    backfilled: set[str] = set()
-    # 记录启动 backfill 覆盖过的标的（含空清单情形下跳过的）
-    try:
-        backfilled.update(symbols_bf)
-    except NameError:
-        pass
+    backfilled: set[str] = set(symbols_bf)
 
     def _backfill_new_symbols(new_syms: list[str], until_dt) -> None:
         """对 mock 运行中新加入的标的增量回填 9:15 → until_dt 段。
@@ -677,8 +684,11 @@ def _mock_loop() -> None:
                             pl.col("ts_ms") == bf_df["ts_ms"].max()
                         )
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    # 不吞掉：新标的的首批信号评估失败应有迹可循
+                    logger.debug(
+                        "mock incremental backfill dispatch failed: %s", e
+                    )
                 logger.info(
                     "mock incremental backfill: %d symbols × %d ticks to %s",
                     len(new_syms),
@@ -704,11 +714,7 @@ def _mock_loop() -> None:
         provider.set_tick_interval(float(interval_sec))
         # Mock 标的来自三个模块 collector（持仓T / 自选股 / 超买超卖）
         # 这样测试页与真实循环共享同一份标的列表，避免重复配置
-        try:
-            symbols = scheduler._collector.collect() if scheduler._collector else []
-        except Exception as e:
-            logger.warning("mock loop collector failed: %s", e)
-            symbols = []
+        symbols = scheduler.collect_symbols()
         # 增量回填：mock 运行中新加入的标的补抓 9:15 → 当前虚拟时钟 段
         new_syms = [s for s in symbols if s not in backfilled]
         if new_syms:
@@ -734,8 +740,9 @@ def _mock_loop() -> None:
                 last_ms = _latest_ts_ms(df)
                 with _test_state["lock"]:
                     _test_state["last_tick_ms"] = last_ms
-                    _test_state["tick_count"] += 1
-                    _test_state["mock_tick_count"] += 1
+                    # 口径 = 标的×tick 行数（与 backfill 分支一致）
+                    _test_state["tick_count"] += df.height
+                    _test_state["mock_tick_count"] += df.height
         # 真实睡眠间隔 = interval_sec / acceleration
         # interval_sec 与真实循环查询同口径（用户在「A股免费实时行情」配置面板设置）
         accel = max(1, int(cfg.get("acceleration", 1)))
@@ -762,12 +769,13 @@ def _real_loop() -> None:
         if not sources:
             time.sleep(1.0)
             continue
-        idx = _test_state.get("real_idx", 0) % len(sources)
-        _test_state["real_idx"] = idx + 1
+        idx = _test_state.setdefault("real_idx", 0) % len(sources)
+        with _test_state["lock"]:
+            _test_state["real_idx"] = idx + 1
         source = sources[idx]
         try:
             provider = get_provider(source)
-            symbols = scheduler._collector.collect()
+            symbols = scheduler.collect_symbols()
             if symbols:
                 df = provider.get_realtime(symbols)
                 if not df.is_empty():
@@ -778,8 +786,9 @@ def _real_loop() -> None:
                     last_ms = _latest_ts_ms(df)
                     with _test_state["lock"]:
                         _test_state["last_tick_ms"] = last_ms
-                        _test_state["tick_count"] += 1
-                        _test_state["real_tick_count"] += 1
+                        # 口径 = 标的×tick 行数（与 mock 循环一致）
+                        _test_state["tick_count"] += df.height
+                        _test_state["real_tick_count"] += df.height
         except Exception as e:
             logger.warning("test real loop tick failed: %s", e)
         interval = fr_config.get_interval_sec()
@@ -884,6 +893,7 @@ def _push_overbought_signals(sigs, source: str = "real") -> None:
 
     消息抑制：同股同方向 60s 内只推送一次。
     """
+    # try 只包推送调用本身：信号组装/名称解析的 bug 不应被静默吞掉
     try:
         import time as _time
 
@@ -909,14 +919,13 @@ def _push_overbought_signals(sigs, source: str = "real") -> None:
         # 中文名兜底：mock 链路 name 可能回落为代码本身；
         # 这里从超买超卖标的清单（含 name 字段）反查中文名，避免 "300757.SZ(300757.SZ)"
         try:
-            from app.services.free_realtime import config as fr_config
-
             name_map = {
                 it.get("symbol"): it.get("name")
                 for it in fr_config.list_overbought_symbols()
                 if it.get("symbol") and it.get("name")
             }
-        except Exception:
+        except Exception as e:
+            logger.debug("overbought name_map build failed: %s", e)
             name_map = {}
         lines = []
         for d in pending:
@@ -937,16 +946,19 @@ def _push_overbought_signals(sigs, source: str = "real") -> None:
         body = "\n".join(lines)
         title = f"{mock_tag}超买超卖提示"
         for ch in channels:
-            if ch == "feishu":
-                url = preferences.get_feishu_webhook_url()
-                if not url:
-                    continue
-                secret = preferences.get_feishu_webhook_secret()
-                webhook_adapter.send_feishu_card(url, title, "", body, secret)
-            elif ch == "wecom":
-                url = preferences.get_wecom_webhook_url()
-                if not url:
-                    continue
-                webhook_adapter.send_wecom_markdown(url, title, body)
+            try:
+                if ch == "feishu":
+                    url = preferences.get_feishu_webhook_url()
+                    if not url:
+                        continue
+                    secret = preferences.get_feishu_webhook_secret()
+                    webhook_adapter.send_feishu_card(url, title, "", body, secret)
+                elif ch == "wecom":
+                    url = preferences.get_wecom_webhook_url()
+                    if not url:
+                        continue
+                    webhook_adapter.send_wecom_markdown(url, title, body)
+            except Exception as e:
+                logger.warning("overbought_oversold push via %s failed: %s", ch, e)
     except Exception as e:
         logger.warning("overbought_oversold push failed: %s", e)

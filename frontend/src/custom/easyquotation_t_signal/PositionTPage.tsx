@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import {
@@ -19,7 +19,10 @@ import {
 } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
 import { StockPanel } from '@/components/StockPanel'
-import { api } from '@/lib/api'
+import {
+  useFreeRealtimeIntradayRefetchMs,
+  useFreeRealtimeTestStatus,
+} from '@/custom/free_realtime/hooks'
 import { AddPositionDialog } from './AddPositionDialog'
 import {
   tSignalApi,
@@ -362,16 +365,8 @@ export function PositionTPage() {
     queryFn: tSignalApi.status,
     refetchInterval: (q) => (q.state.data?.running ? 5000 : 15000),
   })
-  // 免费实时行情测试页状态: mock/真实循环运行时, 持仓T 详情分时图自动持续刷新
-  // 运行时 3s 高频；停止时 15s 低频仅用于感知启动
-  const frTestStatusQ = useQuery({
-    queryKey: ['free-realtime-test', 'status'] as const,
-    queryFn: api.freeRealtimeTestStatus,
-    refetchInterval: (q) => {
-      const d = q.state.data
-      return d && (d.mock_running || d.real_loop_running) ? 3000 : 15000
-    },
-  })
+  // 免费实时行情测试页状态: 与其他页面共享同一 queryKey 与轮询节奏
+  const frTestStatusQ = useFreeRealtimeTestStatus()
   const configQ = useQuery({ queryKey: configKey(), queryFn: tSignalApi.getConfig })
   const positionsQ = useQuery({
     queryKey: positionsKey(),
@@ -387,27 +382,33 @@ export function PositionTPage() {
   })
   const remove = useMutation({
     mutationFn: (symbol: string) => tSignalApi.removePosition(symbol),
-    onSuccess: () => {
+    onSuccess: (_data, deletedSymbol) => {
       void qc.invalidateQueries({ queryKey: positionsKey() })
-      // 如果删除的是当前选中的, 清除 ?symbol=
-      if (selectedSymbol) setSelectedSymbol('')
+      // 仅当删除的是当前选中标的时才清除 ?symbol=
+      if (selectedSymbol === deletedSymbol) setSelectedSymbol('')
     },
   })
 
+  // 分时图轮询节奏：跟随免费实时行情调度器/测试页循环（与超买超卖页同口径），
+  // 不再用 t-signal 全局轮询状态做门控
+  const intradayRefetchMs = useFreeRealtimeIntradayRefetchMs()
   const status = statusQ.data
-  const frTestRunning = !!(frTestStatusQ.data?.mock_running || frTestStatusQ.data?.real_loop_running)
-  // 分时图轮询节奏：调度器或测试页循环运行时按配置 interval_sec 轮询（与抓取节奏对齐，避免高频拉前端）
-  // 停止时返回 false：不轮询，无新数据
-  const intradayRefetchMs = (status?.running || frTestRunning)
-    ? Math.max(1000, (status?.interval_sec ?? 3) * 1000)
-    : false
   const config = configQ.data
   const positions = positionsQ.data?.items ?? []
 
-  // 选中标的如果不在列表里 (被删了), 自动清空
-  if (selectedSymbol && !positions.some((p) => p.symbol === selectedSymbol)) {
-    setSelectedSymbol('')
-  }
+  // mock 循环停止后自动切回真实数据源，避免停在无数据的 mock 视图
+  useEffect(() => {
+    if (dataSource === 'mock' && !frTestStatusQ.data?.mock_running) {
+      setDataSource('real')
+    }
+  }, [dataSource, frTestStatusQ.data])
+
+  // 选中标的如果不在列表里 (被删了), 自动清空（useEffect 中执行，避免渲染期 setState）
+  useEffect(() => {
+    if (selectedSymbol && !positions.some((p) => p.symbol === selectedSymbol)) {
+      setSelectedSymbol('')
+    }
+  }, [selectedSymbol, positions])
 
   return (
     <div className="h-full flex flex-col">

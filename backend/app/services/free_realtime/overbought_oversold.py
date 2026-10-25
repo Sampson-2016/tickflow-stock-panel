@@ -15,14 +15,20 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import polars as pl
 
+from app.markets import CN_TZ
 from app.services.free_realtime import config as fr_config
 
 logger = logging.getLogger(__name__)
+
+# 日线 raw_close 当日缓存: (id(repository), symbol) -> (date, closes)。
+# 日线数据一天内不变，evaluate 每 tick（默认 6s）都会调用，无缓存时
+# 每标的每 tick 扫一次 parquet。键带 repository 身份，隔离测试中的 fake repo。
+_closes_cache: dict[tuple[int, str], tuple] = {}
 
 
 def is_a_stock_candidate(symbol: str) -> bool:
@@ -50,8 +56,13 @@ class OverboughtSignal:
 
 
 def _load_recent_closes(repository, symbol: str, n: int = 4) -> list[float]:
-    """从仓库取最近 n 个交易日的 raw_close（不含今日）。"""
-    end = date.today() - timedelta(days=1)
+    """从仓库取最近 n 个交易日的 raw_close（不含今日）。带当日缓存。"""
+    today = datetime.now(CN_TZ).date()
+    cache_key = (id(repository), symbol)
+    cached = _closes_cache.get(cache_key)
+    if cached and cached[0] == today:
+        return cached[1][:n]
+    end = today - timedelta(days=1)
     start = end - timedelta(days=15)  # 多取一些防止停牌
     try:
         df: pl.DataFrame = repository.get_daily(
@@ -59,11 +70,14 @@ def _load_recent_closes(repository, symbol: str, n: int = 4) -> list[float]:
         )
     except Exception as e:
         logger.warning("overbought_oversold load %s failed: %s", symbol, e)
-        return []
+        return cached[1][:n] if cached else []
     if df.is_empty() or "raw_close" not in df.columns:
-        return []
-    series = df.sort("date").tail(n)["raw_close"].to_list()
-    return [v for v in series if v is not None and v > 0]
+        return cached[1][:n] if cached else []
+    series = df.sort("date").tail(30)["raw_close"].to_list()
+    closes = [v for v in series if v is not None and v > 0]
+    if closes:
+        _closes_cache[cache_key] = (today, closes)
+    return closes[-n:]
 
 
 def evaluate(
@@ -83,6 +97,9 @@ def evaluate(
     """
     if df.is_empty():
         return []
+    # 模块总开关提前早退，避免白算阈值表/disabled 集合
+    if not fr_config.get_module_enabled("overbought_oversold"):
+        return []
     # 全局阈值作为兜底默认；个股 overbought_pct/oversold_pct 优先覆盖
     default_ob = fr_config.get_overbought_pct()
     default_os = fr_config.get_oversold_pct()
@@ -96,8 +113,6 @@ def evaluate(
             float(os_) if os_ is not None else default_os,
         )
     disabled = set(fr_config.list_disabled_symbols("overbought_oversold"))
-    if not fr_config.get_module_enabled("overbought_oversold"):
-        return []
 
     out: list[OverboughtSignal] = []
     for row in df.iter_rows(named=True):

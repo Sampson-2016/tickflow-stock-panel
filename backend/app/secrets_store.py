@@ -83,12 +83,12 @@ def get_ai_key() -> str:
 
 
 def get_ai_config(key: str, default: str = "") -> str:
-    """取 AI 配置项:secrets.json 优先,否则 config。"""
+    """取 AI 配置项:secrets.json 优先,否则 config。非字符串值统一 str() 包裹防 AttributeError。"""
     val = load().get(key)
     if val:
         return str(val).strip()
     from app.config import settings
-    return (getattr(settings, key, default) or default).strip()
+    return str(getattr(settings, key, default) or default).strip()
 
 
 def get_ai_config_int(key: str, default: int) -> int:

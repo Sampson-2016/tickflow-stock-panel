@@ -11,14 +11,17 @@
 
 收盘价来源：优先日 K raw_close（收盘后管道落盘），缺失时降级用当日
 最新 tick 的 last_price，并在行内标注 price_source="tick"。
-报告归档: DATA_DIR/free_realtime/oo_reports/YYYY-MM-DD.json（同日覆盖）。
+报告归档: DATA_DIR/free_realtime/oo_reports/YYYY-MM-DD_HHMMSS.json
+（每次生成一份、不覆盖；trigger 字段区分 scheduled/manual；
+ 仅保留最近 OO_ARCHIVE_RETENTION_DAYS 份，超期自动清理）。
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import polars as pl
@@ -52,24 +55,34 @@ DEFAULT_PROMPT = """你是一名 A 股量化助手。以下是基于收盘数据
 
 # ── 收盘价获取 ─────────────────────────────────────────────
 
-def _daily_close(repository, symbol: str) -> float | None:
-    """取最近一个交易日的日 K raw_close（不含今日之前15日窗口内）。"""
-    end = date.today()
-    start = end - timedelta(days=15)
+def _load_closes(
+    repository, symbol: str,
+) -> tuple[float | None, list[float]]:
+    """一次 get_daily 同时取「最近一个交易日收盘」与「前 4 个交易日收盘」。
+
+    与旧实现（_daily_close + _recent_closes 两次查询）口径一致，但每标的
+    只扫一次 parquet：
+      - latest_close: 窗口 [today-16, today] 内最后一个有效 raw_close
+      - prev_closes:  date < today 的最后 4 个有效 raw_close
+    """
+    today = datetime.now(CN_TZ).date()
+    start = today - timedelta(days=16)
     try:
         df: pl.DataFrame = repository.get_daily(
-            symbol, start, end, columns=["date", "raw_close"]
+            symbol, start, today, columns=["date", "raw_close"]
         )
     except Exception as e:
         logger.warning("oo_report load daily %s failed: %s", symbol, e)
-        return None
+        return None, []
     if df.is_empty() or "raw_close" not in df.columns:
-        return None
-    series = df.sort("date")["raw_close"].to_list()
-    for v in reversed(series):
-        if v is not None and v > 0:
-            return float(v)
-    return None
+        return None, []
+    pairs = sorted(zip(df["date"].to_list(), df["raw_close"].to_list()))
+    valid = [(d, v) for d, v in pairs if v is not None and v > 0]
+    if not valid:
+        return None, []
+    latest = float(valid[-1][1])
+    prev = [float(v) for d, v in valid if d < today][-4:]
+    return latest, prev
 
 
 def _tick_close(scheduler, symbol: str) -> float | None:
@@ -85,23 +98,6 @@ def _tick_close(scheduler, symbol: str) -> float | None:
             if last is not None and float(last) > 0:
                 return float(last)
     return None
-
-
-def _recent_closes(repository, symbol: str, n: int = 4) -> list[float]:
-    """前 n 个交易日 raw_close（不含今日），与 overbought_oversold 同实现。"""
-    end = date.today() - timedelta(days=1)
-    start = end - timedelta(days=15)
-    try:
-        df: pl.DataFrame = repository.get_daily(
-            symbol, start, end, columns=["date", "raw_close"]
-        )
-    except Exception as e:
-        logger.warning("oo_report load %s failed: %s", symbol, e)
-        return []
-    if df.is_empty() or "raw_close" not in df.columns:
-        return []
-    series = df.sort("date").tail(n)["raw_close"].to_list()
-    return [v for v in series if v is not None and v > 0]
 
 
 # ── 三类评估 ───────────────────────────────────────────────
@@ -177,15 +173,16 @@ def collect_report_rows(
         if not is_a_stock_candidate(symbol):
             continue
         overbought, oversold = per_symbol.get(symbol, (default_ob, default_os))
+        # 一次查询同时取最近收盘与前 4 日收盘
+        latest_close, closes_prev = _load_closes(repository, symbol)
         # 收盘价：日 K 优先，缺失降级 tick
-        close = _daily_close(repository, symbol)
+        close = latest_close
         price_source = "daily"
         if close is None:
             close = _tick_close(scheduler, symbol)
             price_source = "tick"
         if close is None:
             continue
-        closes_prev = _recent_closes(repository, symbol, 4)
         evaluated += 1
         row = evaluate_close(
             symbol,
@@ -281,12 +278,15 @@ def generate_report(
     categories: list[str] | None = None,
     *,
     push: bool = True,
+    trigger: str = "manual",
 ) -> dict[str, Any]:
     """生成收盘报告：评估 → 组装 → AI 总结 → 归档 → 推送。
 
     Args:
         categories: 勾选的类别子集，缺省用已存偏好。
         push: 是否尝试推送飞书（未配置 webhook 时静默跳过）。
+        trigger: 触发来源 "manual" / "scheduled"；scheduled 用于定时任务
+            判重（手动生成不会抑制当天定时任务）。
 
     Returns:
         完整报告 dict（三类清单 + ai_commentary + as_of + text）。
@@ -314,6 +314,7 @@ def generate_report(
         "near": [r for r in rows if r["category"] == "near"],
         "far": [r for r in rows if r["category"] == "far"],
         "ai_commentary": None,
+        "trigger": trigger if trigger in ("manual", "scheduled") else "manual",
     }
     if fr_config.get_oo_report_ai_enabled():
         report["ai_commentary"] = _ai_commentary(rows, categories)
@@ -327,14 +328,31 @@ def generate_report(
 
 # ── 归档 ───────────────────────────────────────────────────
 
+# 归档保留份数：定时+手动累积，超出后按文件名时间戳清理最旧的
+OO_ARCHIVE_RETENTION = 90
+
+
 def _archive_dir():
     from app.config import settings
 
     return settings.data_dir / "free_realtime" / "oo_reports"
 
 
+def _cleanup_archives(d, keep: int = OO_ARCHIVE_RETENTION) -> None:
+    """仅保留最近 keep 份归档，防止 list_archives/scheduled 判重线性膨胀。"""
+    files = sorted(d.glob("*.json"))
+    for p in files[:-keep] if len(files) > keep else []:
+        try:
+            p.unlink()
+        except OSError as e:
+            logger.warning("oo_report archive cleanup %s failed: %s", p.name, e)
+
+
 def archive(report: dict[str, Any]) -> None:
-    """按生成时间归档（每次生成一份，不覆盖；文件名 YYYY-MM-DD_HHMMSS.json）。"""
+    """按生成时间归档（每次生成一份，不覆盖；文件名 YYYY-MM-DD_HHMMSS.json）。
+
+    归档带 trigger 字段；超出 OO_ARCHIVE_RETENTION 份自动清理最旧的。
+    """
     d = _archive_dir()
     d.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(CN_TZ).strftime("%Y-%m-%d_%H%M%S")
@@ -342,6 +360,7 @@ def archive(report: dict[str, Any]) -> None:
     path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    _cleanup_archives(d)
 
 
 def list_archives() -> list[dict[str, Any]]:
@@ -372,7 +391,12 @@ def list_archives() -> list[dict[str, Any]]:
 
 
 def load_archive(file_or_date: str) -> dict[str, Any] | None:
-    """按归档文件名（YYYY-MM-DD_HHMM）或旧版日期名加载。"""
+    """按归档文件名（YYYY-MM-DD_HHMMSS）或旧版日期名加载。
+
+    文件名做格式白名单校验，防路径拼接被注入非法字符。
+    """
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(_\d{6})?", str(file_or_date)):
+        return None
     p = _archive_dir() / f"{file_or_date}.json"
     if not p.exists():
         return None
@@ -406,6 +430,15 @@ def push_report(text: str) -> bool:
 
 _report_thread: threading.Thread | None = None
 _report_thread_lock = threading.Lock()
+_report_stop_event: threading.Event | None = None
+
+
+def stop_report_scheduler() -> None:
+    """停止收盘报告守护线程（供关闭钩子/测试使用）。"""
+    global _report_stop_event
+    with _report_thread_lock:
+        if _report_stop_event is not None:
+            _report_stop_event.set()
 
 
 def _is_trading_day_today() -> bool:
@@ -414,9 +447,21 @@ def _is_trading_day_today() -> bool:
 
 
 def _scheduled_fire_today() -> bool:
-    """今天到点后是否已生成过（按归档文件名日期前缀匹配）。"""
-    today = date.today().isoformat()
-    return any(a.get("trade_date") == today for a in list_archives())
+    """今天到点后定时任务是否已生成过（只看 trigger=scheduled 的归档）。
+
+    手动生成的报告不抑制当天定时任务；旧版归档无 trigger 字段时忽略。
+    """
+    today = datetime.now(CN_TZ).date().isoformat()
+    for a in list_archives():
+        if a.get("trade_date") != today:
+            continue
+        try:
+            data = load_archive(a["file"])
+        except Exception:
+            continue
+        if data and data.get("trigger") == "scheduled":
+            return True
+    return False
 
 
 def _report_watch_loop(stop_event: threading.Event) -> None:
@@ -434,7 +479,7 @@ def _report_watch_loop(stop_event: threading.Event) -> None:
             if _scheduled_fire_today():
                 continue
             logger.info("oo_report scheduled generation fired at %s", now_hm)
-            generate_report()
+            generate_report(trigger="scheduled")
         except Exception as e:
             logger.warning("oo_report schedule loop error: %s", e)
 
@@ -446,6 +491,7 @@ def auto_start_report_scheduler() -> None:
         if _report_thread is not None and _report_thread.is_alive():
             return
         stop_event = threading.Event()
+        globals()["_report_stop_event"] = stop_event
         _report_thread = threading.Thread(
             target=_report_watch_loop, args=(stop_event,),
             name="oo-report-scheduler", daemon=True,

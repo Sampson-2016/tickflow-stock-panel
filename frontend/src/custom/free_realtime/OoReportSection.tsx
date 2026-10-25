@@ -8,7 +8,7 @@ import {
   FileText,
   RefreshCcw,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { toast } from '@/components/Toast'
 import {
   BTN_SECONDARY,
@@ -27,6 +27,13 @@ const CATEGORY_META = [
 ] as const
 
 type CategoryKey = (typeof CATEGORY_META)[number]['key']
+
+/** 归档文件名里的裸时间串（"183000"）→ "18:30:00"；已含冒号或其他格式原样返回 */
+function fmtRawTime(t: string): string {
+  const s = t.trim()
+  if (/^\d{6}$/.test(s)) return `${s.slice(0, 2)}:${s.slice(2, 4)}:${s.slice(4, 6)}`
+  return s
+}
 
 function RowTable({ rows }: { rows: OoReportRow[] }) {
   if (rows.length === 0) {
@@ -95,7 +102,7 @@ export function OoReportSection({ status }: { status?: FreeRealtimeStatus }) {
     ai_commentary: boolean
     prompt: string
   } | null>(null)
-  const d = draft ?? (cfg
+  const d = useMemo(() => draft ?? (cfg
     ? {
         schedule_enabled: cfg.schedule_enabled,
         schedule_time: cfg.schedule_time,
@@ -103,7 +110,7 @@ export function OoReportSection({ status }: { status?: FreeRealtimeStatus }) {
         ai_commentary: cfg.ai_commentary,
         prompt: cfg.prompt,
       }
-    : null)
+    : null), [draft, cfg])
 
   const saveConfigMut = useMutation({
     mutationFn: (patch: Record<string, unknown>) => freeRealtimeApi.ooReportPutConfig(patch),
@@ -115,9 +122,10 @@ export function OoReportSection({ status }: { status?: FreeRealtimeStatus }) {
     onError: (e: Error) => toast(`保存失败: ${e.message}`),
   })
 
-  // 生成报告
+  // 生成报告（手动生成默认不推送飞书，可在按钮旁勾选开启）
+  const [pushToFeishu, setPushToFeishu] = useState(false)
   const generateMut = useMutation({
-    mutationFn: () => freeRealtimeApi.ooReportGenerate(),
+    mutationFn: (push: boolean) => freeRealtimeApi.ooReportGenerate(undefined, push),
     onSuccess: (rep) => {
       setDetail(rep)
       qc.invalidateQueries({ queryKey: ['free-realtime-overbought', 'reports'] })
@@ -131,11 +139,13 @@ export function OoReportSection({ status }: { status?: FreeRealtimeStatus }) {
     queryKey: ['free-realtime-overbought', 'reports'],
     queryFn: freeRealtimeApi.ooReports,
     enabled: historyOpen,
+    staleTime: 60_000,
   })
 
-  const loadDetail = async (tradeDate: string) => {
+  // fileOrDate: 归档文件 stem（如 "2026-10-25_183000"）或交易日
+  const loadDetail = async (fileOrDate: string) => {
     try {
-      setDetail(await freeRealtimeApi.ooReportDetail(tradeDate))
+      setDetail(await freeRealtimeApi.ooReportDetail(fileOrDate))
     } catch (e) {
       toast(`加载失败: ${e instanceof Error ? e.message : e}`)
     }
@@ -166,12 +176,23 @@ export function OoReportSection({ status }: { status?: FreeRealtimeStatus }) {
               type="button"
               className={BTN_SM_PRIMARY}
               disabled={!moduleEnabled || generateMut.isPending}
-              onClick={() => generateMut.mutate()}
+              onClick={() => generateMut.mutate(pushToFeishu)}
               title={moduleEnabled ? '基于收盘日 K 生成三类报告' : '请先开启超买超卖模块'}
             >
               <RefreshCcw className={`h-3.5 w-3.5 ${generateMut.isPending ? 'animate-spin' : ''}`} />
               {generateMut.isPending ? '生成中…' : '生成报告'}
             </button>
+            <label
+              className="flex items-center gap-1 text-[11px] text-secondary cursor-pointer"
+              title="生成后推送到飞书"
+            >
+              <input
+                type="checkbox"
+                checked={pushToFeishu}
+                onChange={(e) => setPushToFeishu(e.target.checked)}
+              />
+              推送飞书
+            </label>
             <button
               type="button"
               className={BTN_SM_SECONDARY}
@@ -238,7 +259,9 @@ export function OoReportSection({ status }: { status?: FreeRealtimeStatus }) {
                       >
                         <span className="text-foreground">
                           {r.trade_date}
-                          <span className="ml-1 text-muted">{(r.as_of ?? '').slice(11) || r.file.slice(11)}</span>
+                          <span className="ml-1 text-muted">
+                            {fmtRawTime((r.as_of ?? '').slice(11)) || fmtRawTime(r.file.slice(11))}
+                          </span>
                         </span>
                         <span className="text-muted">
                           达 {r.counts.reached ?? 0} / 近 {r.counts.near ?? 0} / 远 {r.counts.far ?? 0}

@@ -4,6 +4,7 @@ from __future__ import annotations
 import gzip
 import io
 import logging
+import re
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -410,6 +411,9 @@ _COMPRESSIBLE_TYPES = frozenset({
     "image/svg+xml",
 })
 _STREAMING_TYPES = frozenset({"text/event-stream", "application/x-ndjson"})
+# 压缩响应的最大体积上限（字节）：超大 JSON 全量缓冲在内存 BytesIO 里
+# 可能出现数 MB 级单请求占用，超过后原样透传更划算
+_MAX_COMPRESS_BYTES = 8 * 1024 * 1024
 
 
 class SelectiveGZipMiddleware:
@@ -436,11 +440,15 @@ class SelectiveGZipMiddleware:
                 headers = MutableHeaders(raw=message["headers"])
                 ctype = headers.get("content-type", "").split(";")[0].strip().lower()
                 content_length = headers.get("content-length")
+                try:
+                    length = int(content_length) if content_length is not None else None
+                except ValueError:
+                    length = None  # 畸形 Content-Length：放弃压缩，透传兜底
                 state["compress"] = (
                     ctype in _COMPRESSIBLE_TYPES
                     and ctype not in _STREAMING_TYPES
-                    and content_length is not None
-                    and int(content_length) >= self.minimum_size
+                    and length is not None
+                    and self.minimum_size <= length <= _MAX_COMPRESS_BYTES
                 )
                 if not state["compress"]:
                     await send(message)
@@ -476,13 +484,21 @@ class HashedAssetsStaticFiles(StaticFiles):
 
     Vite 产物文件名含内容 hash, 内容变 → 文件名变, 因此可以安全长缓存:
     二次访问浏览器直接用本地副本, 零网络请求 (否则每次都要发条件请求验证)。
+    仅对文件名确实含 hash 的产物加 immutable；拷贝进 assets 的非 hash 文件
+    (favicon 等) 用 1 小时短缓存, 避免改版后浏览器一年不 revalidate。
     """
+
+    _HASH_NAME_RE = re.compile(r"[-.][A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$")
 
     async def get_response(self, path: str, scope: Scope):
         response = await super().get_response(path, scope)
         # 只给成功/304 响应加缓存头, 404 等错误不缓存
         if response.status_code < 400:
-            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            name = path.rsplit("/", 1)[-1]
+            if self._HASH_NAME_RE.search(name):
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            else:
+                response.headers["Cache-Control"] = "public, max-age=3600"
         return response
 
 

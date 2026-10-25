@@ -6,7 +6,7 @@ import {
   RefreshCcw,
   Trash2,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { toast } from '@/components/Toast'
 import {
   ACCELERATIONS,
@@ -18,24 +18,22 @@ import {
   freeRealtimeApi,
   type FreeRealtimeTestStatus,
 } from './api'
+import { FR_TEST_STATUS_KEY, useFreeRealtimeTestStatus } from './hooks'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
 
 const QK = ['free-realtime-test'] as const
-const statusKey = () => [...QK, 'status'] as const
 const collectKey = () => [...QK, 'collect-symbols'] as const
 // mock 虚拟时钟起点白名单（与后端 _ALLOWED_START_TIMES 一致）
 const START_TIMES = ['09:15', '09:30', '10:30', '11:00', '13:00', '14:00'] as const
 
 export function FreeRealtimeTestPage() {
   const qc = useQueryClient()
-  const statusQ = useQuery({
-    queryKey: statusKey(),
-    queryFn: freeRealtimeApi.testStatus,
-    // 运行时高频；停止时低频（10s）仅用于感知用户何时启动循环
-    refetchInterval: (q) => {
-      const d = q.state.data
-      return d && (d.mock_running || d.real_loop_running) ? 2000 : 10000
-    },
+  // 运行时 3s 高频；停止时 15s 低频仅用于感知用户何时启动循环（与其他页面统一口径）
+  const statusQ = useFreeRealtimeTestStatus()
+  // 后端 mock 配置（加速倍率/起点时间），用于把本地 state 与后端对齐
+  const mockConfigQ = useQuery({
+    queryKey: [...QK, 'mock-config'] as const,
+    queryFn: freeRealtimeApi.testMockConfig,
   })
   // 当前 mock/真实循环会拉的标的（来自三个模块 collector）
   // 仅在运行时轮询；停止时不轮询，避免无谓请求
@@ -50,6 +48,14 @@ export function FreeRealtimeTestPage() {
   const [acceleration, setAcceleration] = useState<number>(1)
   const [startTime, setStartTime] = useState<string>('09:15')
   const [previewSymbol, setPreviewSymbol] = useState('')
+
+  // 后端 mock 配置到达时同步本地 state（acceleration/startTime 不再是硬编码默认值）
+  useEffect(() => {
+    const cfg = mockConfigQ.data?.config
+    if (!cfg) return
+    if (typeof cfg.acceleration === 'number') setAcceleration(cfg.acceleration)
+    if (typeof cfg.start_time === 'string') setStartTime(cfg.start_time)
+  }, [mockConfigQ.data])
 
   // StockIntradayChart 的 tick 路径需要 date 才会激活；测试页传「今天」即可
   const todayStr = (() => {
@@ -71,29 +77,29 @@ export function FreeRealtimeTestPage() {
 
   const startMock = useMutation({
     mutationFn: freeRealtimeApi.testMockStart,
-    onSuccess: () => qc.invalidateQueries({ queryKey: statusKey() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: FR_TEST_STATUS_KEY }),
   })
   const stopMock = useMutation({
     mutationFn: freeRealtimeApi.testMockStop,
-    onSuccess: () => qc.invalidateQueries({ queryKey: statusKey() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: FR_TEST_STATUS_KEY }),
   })
   const startReal = useMutation({
     mutationFn: freeRealtimeApi.testRealStart,
-    onSuccess: () => qc.invalidateQueries({ queryKey: statusKey() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: FR_TEST_STATUS_KEY }),
   })
   const stopReal = useMutation({
     mutationFn: freeRealtimeApi.testRealStop,
-    onSuccess: () => qc.invalidateQueries({ queryKey: statusKey() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: FR_TEST_STATUS_KEY }),
   })
   const clearMut = useMutation({
     mutationFn: (kind: 'real' | 'mock') => freeRealtimeApi.testClear(kind),
     onSuccess: (r) => {
       toast(`已清空 ${r.kind} 落盘 (${r.removed} 项)`, 'success')
       // 刷新状态（tick_count/last_tick_ms 归零）+ 分时预览（曲线清空）
-      // 不能只 invalidate statusKey，分时图用的是 StockIntradayChart 的独立 query
-      // （['free-realtime', 'intraday', symbol, kind]），必须用模糊匹配清掉所有 intraday 缓存
-      qc.invalidateQueries({ queryKey: statusKey() })
-      qc.invalidateQueries({ queryKey: [...QK, 'intraday'], exact: false })
+      // 不能只 invalidate 测试页 status，分时图用的是 StockIntradayChart 的独立 query
+      // （['free-realtime', 'intraday', symbol, kind]），必须用前缀匹配清掉所有 intraday 缓存
+      qc.invalidateQueries({ queryKey: FR_TEST_STATUS_KEY })
+      qc.invalidateQueries({ queryKey: ['free-realtime', 'intraday'] })
     },
   })
 

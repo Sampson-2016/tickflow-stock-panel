@@ -8,7 +8,9 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import re
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -18,12 +20,22 @@ logger = logging.getLogger(__name__)
 _cache: dict | None = None
 _cache_sig: tuple[int, int] | None = None
 
+# 串行化写盘：多个线程并发 save 时的 read-modify-write 不会交错覆盖
+_WRITE_LOCK = threading.Lock()
+
 
 def _path() -> Path:
     from app.config import settings
     p = settings.data_dir / "user_data" / "preferences.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _write_atomic(p: Path, text: str) -> None:
+    """tmp + os.replace 原子写，避免进程在写中途崩溃损坏整个配置文件。"""
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, p)
 
 
 def _invalidate_cache() -> None:
@@ -56,12 +68,14 @@ def load() -> dict:
 
 def save(updates: dict) -> dict:
     """合并写入。返回新内容。"""
-    current = load()
-    current.update(updates)
-    _path().write_text(
-        json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8",
-    )
-    _invalidate_cache()
+    with _WRITE_LOCK:
+        current = load()
+        current.update(updates)
+        _write_atomic(
+            _path(),
+            json.dumps(current, indent=2, ensure_ascii=False),
+        )
+        _invalidate_cache()
     return current
 
 
@@ -111,8 +125,9 @@ def set_realtime_quote_interval(interval: float) -> float:
     """保存行情轮询间隔（不在此做 min/max 校验，由调用方按档位限制）。"""
     current = load()
     current["realtime_quote_interval"] = interval
-    _path().write_text(
-        json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8",
+    _write_atomic(
+        _path(),
+        json.dumps(current, indent=2, ensure_ascii=False),
     )
     _invalidate_cache()
     return interval

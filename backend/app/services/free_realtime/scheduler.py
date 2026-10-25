@@ -295,16 +295,18 @@ class FreeRealtimeScheduler:
         self._dispatch(df, "real")
 
     def _dispatch(self, df, source: str) -> None:
-        """按数据来源（real/mock）广播给模块回调。回调签名 callback(df, source)。"""
-        for callback in self._module_callbacks:
+        """按数据来源（real/mock）广播给模块回调。
+
+        回调签名在注册时用 inspect.signature 判定（1 参 = 旧签名 callback(df)，
+        2 参 = callback(df, source)），运行期按记录调用——不再用 TypeError
+        试错区分，避免掩盖回调内部真实的 TypeError 且副作用执行两遍。
+        """
+        for callback, arity in self._module_callbacks:
             try:
-                callback(df, source)
-            except TypeError:
-                # 兼容旧签名 callback(df)
-                try:
+                if arity >= 2:
+                    callback(df, source)
+                else:
                     callback(df)
-                except Exception as e:
-                    logger.warning("module callback %s failed: %s", callback, e)
             except Exception as e:
                 logger.warning("module callback %s failed: %s", callback, e)
 
@@ -312,12 +314,38 @@ class FreeRealtimeScheduler:
         """mock 循环调用：把虚拟 tick 广播给模块回调（source="mock"）。"""
         self._dispatch(df, "mock")
 
-    _module_callbacks: ClassVar[list[Callable]] = []  # 类级共享，便于注册
+    _module_callbacks: ClassVar[list] = []  # 类级共享，元素为 (callback, arity)
 
     @classmethod
     def register_module_callback(cls, callback: Callable) -> None:
-        """注册模块评估回调。模块在启动时调用一次即可。"""
-        cls._module_callbacks.append(callback)
+        """注册模块评估回调。模块在启动时调用一次即可（按 callback 去重）。"""
+        if any(cb is callback for cb, _ in cls._module_callbacks):
+            return
+        try:
+            import inspect
+
+            sig = inspect.signature(callback)
+            arity = sum(
+                1 for p in sig.parameters.values()
+                if p.kind in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            )
+        except (TypeError, ValueError):
+            arity = 1
+        cls._module_callbacks.append((callback, arity))
+
+    # ── 标的收集 ───────────────────────────────────────
+    def collect_symbols(self) -> list[str]:
+        """公共标的收集入口：合并各模块 collector 的 enabled 标的（去重）。"""
+        if self._collector is None:
+            return []
+        try:
+            return self._collector.collect()
+        except Exception as e:
+            logger.warning("collect_symbols failed: %s", e)
+            return []
 
     # ── 熔断告警 ───────────────────────────────────────
     def _on_circuit_break(self, source: str, reason: str) -> None:

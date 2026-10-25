@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+import threading
+
 from app.services import preferences
 
 # 默认轮询间隔（秒）；与盘前盘后无关，仅控制拉取节奏
@@ -189,6 +191,10 @@ def list_overbought_symbols() -> list[dict]:
     return out
 
 
+# 超买超卖清单 read-modify-write 串行锁：并发 PUT（前端批量操作）不再互相覆盖丢更新
+_OB_LOCK = threading.RLock()
+
+
 def add_overbought_symbol(symbol: str, name: str | None = None) -> list[dict]:
     """新增一个标的到超买超卖清单；symbol 已存在时仅更新 name，不重复加入。
 
@@ -197,37 +203,40 @@ def add_overbought_symbol(symbol: str, name: str | None = None) -> list[dict]:
     sym = str(symbol or "").strip().upper()
     if not sym:
         raise ValueError("symbol required")
-    items = list_overbought_symbols()
-    for it in items:
-        if it["symbol"] == sym:
-            if name and it.get("name") != name:
-                it["name"] = str(name)
-            _persist_overbought(items)
-            return items
-    items.append({"symbol": sym, "name": str(name or sym), "enabled": True})
-    _persist_overbought(items)
-    return items
+    with _OB_LOCK:
+        items = list_overbought_symbols()
+        for it in items:
+            if it["symbol"] == sym:
+                if name and it.get("name") != name:
+                    it["name"] = str(name)
+                _persist_overbought(items)
+                return items
+        items.append({"symbol": sym, "name": str(name or sym), "enabled": True})
+        _persist_overbought(items)
+        return items
 
 
 def remove_overbought_symbol(symbol: str) -> list[dict]:
     sym = str(symbol or "").strip().upper()
-    items = [it for it in list_overbought_symbols() if it["symbol"] != sym]
-    _persist_overbought(items)
-    return items
+    with _OB_LOCK:
+        items = [it for it in list_overbought_symbols() if it["symbol"] != sym]
+        _persist_overbought(items)
+        return items
 
 
 def set_overbought_symbol_enabled(symbol: str, enabled: bool) -> list[dict]:
     """切换单个超买超卖标的 enabled 状态；不存在则忽略。"""
-    items = list_overbought_symbols()
-    found = False
-    for it in items:
-        if it["symbol"] == symbol.strip().upper():
-            it["enabled"] = bool(enabled)
-            found = True
-            break
-    if found:
-        _persist_overbought(items)
-    return items
+    with _OB_LOCK:
+        items = list_overbought_symbols()
+        found = False
+        for it in items:
+            if it["symbol"] == symbol.strip().upper():
+                it["enabled"] = bool(enabled)
+                found = True
+                break
+        if found:
+            _persist_overbought(items)
+        return items
 
 
 def set_overbought_symbol_thresholds(
@@ -243,17 +252,18 @@ def set_overbought_symbol_thresholds(
         if v is not None and not (0 < float(v) <= 50):
             raise ValueError("threshold pct must be in (0, 50]")
     sym = symbol.strip().upper()
-    items = list_overbought_symbols()
-    found = False
-    for it in items:
-        if it["symbol"] == sym:
-            it["overbought_pct"] = float(overbought_pct) if overbought_pct is not None else None
-            it["oversold_pct"] = float(oversold_pct) if oversold_pct is not None else None
-            found = True
-            break
-    if found:
-        _persist_overbought(items)
-    return items
+    with _OB_LOCK:
+        items = list_overbought_symbols()
+        found = False
+        for it in items:
+            if it["symbol"] == sym:
+                it["overbought_pct"] = float(overbought_pct) if overbought_pct is not None else None
+                it["oversold_pct"] = float(oversold_pct) if oversold_pct is not None else None
+                found = True
+                break
+        if found:
+            _persist_overbought(items)
+        return items
 
 
 def _persist_overbought(items: list[dict]) -> None:
@@ -308,28 +318,34 @@ def set_oo_report_schedule_enabled(enabled: bool) -> bool:
     return get_oo_report_schedule_enabled()
 
 
-def get_oo_report_schedule_time() -> str:
-    """收盘报告定时时间 "HH:MM"；默认 15:10。"""
-    raw = str(_load().get("oo_report_schedule_time", "15:10"))
-    parts = raw.split(":")
+def _parse_hhmm(raw: str, *, strict: bool) -> tuple[int, int]:
+    """解析 "HH:MM"；strict=True 时非法即抛 ValueError，否则回落 (15, 10)。"""
+    parts = str(raw).strip().split(":")
     if len(parts) != 2:
-        return "15:10"
+        if strict:
+            raise ValueError("time must be HH:MM")
+        return 15, 10
     try:
         h, m = int(parts[0]), int(parts[1])
     except ValueError:
-        return "15:10"
+        if strict:
+            raise ValueError("time must be HH:MM") from None
+        return 15, 10
     if not (0 <= h <= 23 and 0 <= m <= 59):
-        return "15:10"
+        if strict:
+            raise ValueError("time out of range")
+        return 15, 10
+    return h, m
+
+
+def get_oo_report_schedule_time() -> str:
+    """收盘报告定时时间 "HH:MM"；默认 15:10。"""
+    h, m = _parse_hhmm(_load().get("oo_report_schedule_time", "15:10"), strict=False)
     return f"{h:02d}:{m:02d}"
 
 
 def set_oo_report_schedule_time(value: str) -> str:
-    parts = str(value).strip().split(":")
-    if len(parts) != 2:
-        raise ValueError("time must be HH:MM")
-    h, m = int(parts[0]), int(parts[1])
-    if not (0 <= h <= 23 and 0 <= m <= 59):
-        raise ValueError("time out of range")
+    h, m = _parse_hhmm(value, strict=True)
     preferences.save({"oo_report_schedule_time": f"{h:02d}:{m:02d}"})
     return get_oo_report_schedule_time()
 
@@ -380,19 +396,51 @@ def _available_set() -> set[str]:
 
 
 def snapshot() -> dict:
-    """一次性返回完整配置（避免前端轮询多次读盘）。"""
+    """一次性返回完整配置（避免前端轮询多次读盘）。
+
+    内部只 load 一次，避免 12 个 getter 各自触发一次 preferences 深拷贝。
+    """
+    data = _load()
+
+    def _b(key: str, default: bool = False) -> bool:
+        return bool(data.get(key, default))
+
+    def _f(key: str, default: float) -> float:
+        try:
+            return float(data.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    raw_sources = data.get("free_realtime_sources")
+    if isinstance(raw_sources, list):
+        avail = _available_set()
+        seen: set[str] = set()
+        sources = [s for s in raw_sources if str(s) in avail and str(s) not in seen and not seen.add(str(s))]  # noqa: B009
+    else:
+        sources = ["sina"]
+    modules = {
+        mod: _b(f"free_realtime_module_{mod}")
+        for mod in ("position_t", "overbought_oversold", "watchlist")
+    }
+    try:
+        interval = max(
+            INTERVAL_MIN_SEC,
+            min(INTERVAL_MAX_SEC, int(data.get("free_realtime_interval_sec", DEFAULT_INTERVAL_SEC) or DEFAULT_INTERVAL_SEC)),
+        )
+    except (TypeError, ValueError):
+        interval = DEFAULT_INTERVAL_SEC
+    try:
+        retention = max(1, min(30, int(data.get("free_realtime_retention_days", 7) or 7)))
+    except (TypeError, ValueError):
+        retention = 7
     return {
-        "enabled": get_global_enabled(),
-        "interval_sec": get_interval_sec(),
-        "sources": get_sources(),
-        "trading_hours_only": get_trading_hours_only(),
-        "retention_days": get_retention_days(),
-        "modules": {
-            "position_t": get_module_enabled("position_t"),
-            "overbought_oversold": get_module_enabled("overbought_oversold"),
-            "watchlist": get_module_enabled("watchlist"),
-        },
-        "overbought_pct": get_overbought_pct(),
-        "oversold_pct": get_oversold_pct(),
+        "enabled": _b("free_realtime_enabled"),
+        "interval_sec": interval,
+        "sources": sources,
+        "trading_hours_only": _b("free_realtime_trading_hours_only", True),
+        "retention_days": retention,
+        "modules": modules,
+        "overbought_pct": _f("free_realtime_overbought_pct", 5.0),
+        "oversold_pct": _f("free_realtime_oversold_pct", 5.0),
         "available_sources": sorted(_available_set()),
     }
