@@ -3157,7 +3157,7 @@ export const api = {
     if (symbol) params.set('symbol', symbol)
     return request<{
       items: Array<{
-        kind: 'price_change' | 'volume_surge' | 'big_order_imbalance'
+        kind: 'price_change' | 'volume_surge' | 'big_order_imbalance' | 'vwap_revert' | 'rsi_extreme' | 'range_break'
         symbol: string
         name: string
         ts_ms: number

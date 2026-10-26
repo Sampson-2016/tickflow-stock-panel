@@ -163,6 +163,16 @@ export function StockIntradayChart({
   // tick 路径渲染：只展示当前已发生的 tick，曲线随时间推进延伸
   if (useTickPath) {
     const isMock = intradayKind === 'mock'
+    // 昨收回退：调用方未传 prevClose 时（测试页/持仓T/超买超卖页），从 tick 行的
+    // prev_close 字段取（RealtimeStore 快照自带）。不回退会导致百分比轴以
+    // 首个 tick 价格为基准，mock 与真实昨收不一致时出现 ±90%+ 的荒谬百分比。
+    const tickPrevClose = prevClose ?? (() => {
+      for (const t of ticks) {
+        const v = Number(t.prev_close ?? 0)
+        if (v > 0 && Number.isFinite(v)) return v
+      }
+      return undefined
+    })()
     return (
       <div className={className} style={{ height, flexShrink: 0 }}>
         {isMock && (
@@ -184,7 +194,7 @@ export function StockIntradayChart({
           <EChartsIntraday
             data={tickRows}
             height={isMock ? height - 22 : height}
-            prevClose={prevClose}
+            prevClose={tickPrevClose}
             date={date}
             onPriceHover={onPriceHover}
             onPriceDoubleClick={onPriceDoubleClick}

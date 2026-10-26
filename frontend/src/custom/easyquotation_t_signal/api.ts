@@ -28,6 +28,9 @@ export const T_SIGNAL_KIND_LABELS: Record<TSignalKind, string> = {
   price_change: '涨跌幅阈值',
   volume_surge: '量比异动',
   big_order_imbalance: '买卖盘失衡',
+  vwap_revert: 'VWAP均价回归',
+  rsi_extreme: 'RSI极值反转',
+  range_break: '分时区间突破',
 }
 
 // 视觉规则 (颜色 / 图标 / side): 单一事实源
@@ -52,5 +55,20 @@ export const T_SIGNAL_VISUAL: Record<TSignalKind, SignalVisual> = {
     color: 'text-accent',
     bgColor: 'bg-accent/10',
     hint: 'info',             // 实际方向 (买/卖) 在 detail 文案里, 这里仅做视觉
+  },
+  vwap_revert: {
+    color: 'text-purple-500', // 均价回归紫
+    bgColor: 'bg-purple-500/10',
+    hint: 'info',             // 实际方向 (买/卖) 由 side 决定
+  },
+  rsi_extreme: {
+    color: 'text-cyan-500',   // RSI 极值青
+    bgColor: 'bg-cyan-500/10',
+    hint: 'info',             // 实际方向 (买/卖) 由 side 决定
+  },
+  range_break: {
+    color: 'text-up',         // 突破顺势红
+    bgColor: 'bg-up/10',
+    hint: 'info',             // 实际方向 (买/卖) 由 side 决定
   },
 }
