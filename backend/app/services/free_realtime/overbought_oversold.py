@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import polars as pl
@@ -29,6 +29,12 @@ logger = logging.getLogger(__name__)
 # 日线数据一天内不变，evaluate 每 tick（默认 6s）都会调用，无缓存时
 # 每标的每 tick 扫一次 parquet。键带 repository 身份，隔离测试中的 fake repo。
 _closes_cache: dict[tuple[int, str], tuple] = {}
+# 日K新鲜度容差（自然日）：最近收盘日距今超过该值视为陈旧数据，跳过评估。
+# 7 天覆盖国庆/春节长假 + 周末；停牌股宁可跳过也不用旧基准给错信号。
+_STALE_CLOSE_TOLERANCE_DAYS = 7
+# 日K缓存 TTL（秒）：超过后回源重读。防止日K盘中被同步任务更新后
+# 仍用陈旧收盘价合成 MA5（实测 -16.2% vs 正确 -8.3%）。
+_CLOSES_CACHE_TTL_SEC = 600
 
 
 def is_a_stock_candidate(symbol: str) -> bool:
@@ -56,11 +62,22 @@ class OverboughtSignal:
 
 
 def _load_recent_closes(repository, symbol: str, n: int = 4) -> list[float]:
-    """从仓库取最近 n 个交易日的 raw_close（不含今日）。带当日缓存。"""
-    today = datetime.now(CN_TZ).date()
+    """从仓库取最近 n 个交易日的 raw_close（不含今日）。带 TTL 缓存 + 新鲜度校验。
+
+    缓存格式: (today, closes, last_date, written_ts)。
+    日K可能在盘中被同步任务更新（手动同步 / pipeline），旧缓存会让 MA5
+    一直用陈旧收盘价（实测：缓存 460 档 vs 磁盘 420 档 → 偏离 -16.2% vs -8.3%）。
+    因此缓存命中超过 TTL（10 分钟）后回源校验最新日期，日期前移即失效重载。
+    """
+    now = datetime.now(CN_TZ)
+    today = now.date()
     cache_key = (id(repository), symbol)
     cached = _closes_cache.get(cache_key)
-    if cached and cached[0] == today:
+    if (
+        cached
+        and cached[0] == today
+        and (now.timestamp() - cached[3]) < _CLOSES_CACHE_TTL_SEC
+    ):
         return cached[1][:n]
     end = today - timedelta(days=1)
     start = end - timedelta(days=15)  # 多取一些防止停牌
@@ -73,10 +90,23 @@ def _load_recent_closes(repository, symbol: str, n: int = 4) -> list[float]:
         return cached[1][:n] if cached else []
     if df.is_empty() or "raw_close" not in df.columns:
         return cached[1][:n] if cached else []
-    series = df.sort("date").tail(30)["raw_close"].to_list()
+    # 新鲜度校验：最近收盘日距今不得超过容差（停牌股宁可跳过也不给错信号）
+    sorted_df = df.sort("date")
+    last_date = sorted_df["date"][-1]
+    try:
+        last_d = last_date if isinstance(last_date, date) else date.fromisoformat(str(last_date)[:10])
+    except (ValueError, TypeError):
+        return []
+    if (today - last_d).days > _STALE_CLOSE_TOLERANCE_DAYS:
+        logger.info(
+            "overbought_oversold skip %s: daily kline stale (last=%s, today=%s)",
+            symbol, last_d, today,
+        )
+        return []
+    series = sorted_df.tail(30)["raw_close"].to_list()
     closes = [v for v in series if v is not None and v > 0]
     if closes:
-        _closes_cache[cache_key] = (today, closes)
+        _closes_cache[cache_key] = (today, closes, last_d, now.timestamp())
     return closes[-n:]
 
 

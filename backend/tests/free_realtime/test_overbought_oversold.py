@@ -192,3 +192,41 @@ class TestEvaluate:
     def test_empty_df(self):
         repo = FakeRepo({})
         assert evaluate(pl.DataFrame(), repo) == []
+
+
+class TestLoadRecentClosesCache:
+    """_closes_cache TTL 修复回归：日K盘中被更新后，过期缓存必须重读新数据。"""
+
+    def test_stale_cache_invalidated_after_ttl(self):
+        from datetime import date as _date
+        from datetime import datetime as _datetime
+
+        from app.markets import CN_TZ
+        from app.services.free_realtime import overbought_oversold as oo
+
+        class MultiDateRepo:
+            """两次 get_daily 返回不同收盘序列，模拟盘中日K被同步更新。"""
+
+            def __init__(self):
+                self.calls = 0
+
+            def get_daily(self, symbol, start, end, columns=None):
+                self.calls += 1
+                closes = [10.0, 10.0, 10.0, 10.0] if self.calls == 1 else [20.0, 20.0, 20.0, 20.0]
+                n = len(closes)
+                dates = [_date.today() - timedelta(days=n - i) for i in range(n)]
+                return pl.DataFrame({"symbol": [symbol] * n, "date": dates, "raw_close": closes})
+
+        repo = MultiDateRepo()
+        first = oo._load_recent_closes(repo, "600000.SH", 4)
+        assert first == [10.0, 10.0, 10.0, 10.0]
+        # 不动时间 → TTL 内命中缓存，不回源
+        assert oo._load_recent_closes(repo, "600000.SH", 4) == first
+        assert repo.calls == 1
+        # 把缓存时间戳回拨超过 TTL（10 分钟）→ 下次调用回源读到新日K
+        key = (id(repo), "600000.SH")
+        old = oo._closes_cache[key]
+        oo._closes_cache[key] = (old[0], old[1], old[2], _datetime.now(CN_TZ).timestamp() - 601)
+        second = oo._load_recent_closes(repo, "600000.SH", 4)
+        assert second == [20.0, 20.0, 20.0, 20.0], "TTL 过期后必须重读更新后的日K"
+        assert repo.calls == 2
