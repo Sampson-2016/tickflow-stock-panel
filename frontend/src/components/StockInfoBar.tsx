@@ -14,6 +14,17 @@ interface Props {
   name?: string
   stockInfo?: { name?: string; total_shares?: number; float_shares?: number; ext?: Record<string, unknown> }
   rows: KlineRow[]
+  /** 实时快照覆盖（来自免费实时行情最新 tick）：价格/涨跌幅/量能等盘中实时值。
+   *  字段缺省时回退本地日K（滞后的落库值）。 */
+  realtime?: {
+    price?: number
+    prevClose?: number
+    open?: number
+    high?: number
+    low?: number
+    /** 成交量（手，与日K volume 同口径） */
+    volumeHands?: number
+  }
   /** 信息条字段配置（由 StockPanel 提升，受控） */
   fields: ColumnConfig[]
   onFieldsChange: (fields: ColumnConfig[]) => void
@@ -99,6 +110,7 @@ export function StockInfoBar({
   name,
   stockInfo,
   rows,
+  realtime,
   fields,
   onFieldsChange,
   financialMetrics,
@@ -126,9 +138,23 @@ export function StockInfoBar({
 
   const latest = rows[rows.length - 1]
   const prev = rows.length >= 2 ? rows[rows.length - 2] : null
-  const close = Number(latest.close)
-  const chg = prev ? close - Number(prev.close) : 0
-  const chgPct = prev ? chg / Number(prev.close) * 100 : 0
+  // ── 实时覆盖 ──
+  // realtime 来自免费实时行情最新 tick（StockPanel 传入）。盘中本地日K滞后，
+  // 可从实时快照得到的字段（价/昨收/开高低/量）实时替换；快照没有的字段
+  // （换手率需流通股本×实时量——有 float_shares + 实时量即可算，见下）
+  // 保持原逻辑，确实拿不到的值自然返回 null 而被隐藏（渲染层跳过）。
+  const rtPrice = realtime?.price
+  const rtPrevClose = realtime?.prevClose
+  const rtVolume = realtime?.volumeHands
+  const rtHigh = realtime?.high
+  const rtLow = realtime?.low
+  const close = rtPrice != null && rtPrice > 0 ? rtPrice : Number(latest.close)
+  // 昨收：实时快照权威 > 本地日K前一根（滞后）
+  const baseClose = rtPrevClose != null && rtPrevClose > 0
+    ? rtPrevClose
+    : prev ? Number(prev.close) : null
+  const chg = baseClose ? close - baseClose : 0
+  const chgPct = baseClose ? chg / baseClose * 100 : 0
   const isUp = chg >= 0
   const clr = isUp ? BULL : BEAR
 
@@ -136,8 +162,10 @@ export function StockInfoBar({
   const floatShares = stockInfo?.float_shares
   const marketCap = totalShares ? close * totalShares : null
   const floatMarketCap = floatShares ? close * floatShares : null
-  const turnoverRate = floatShares && latest.volume
-    ? (Number(latest.volume) * 100 / floatShares * 100)
+  // 换手率：实时量（手）优先，日K量回退；×100 股/手 ÷ 流通股本 ×100%
+  const volumeForTurnover = rtVolume != null && rtVolume > 0 ? rtVolume : Number(latest.volume)
+  const turnoverRate = floatShares && volumeForTurnover
+    ? (volumeForTurnover * 100 / floatShares * 100)
     : null
 
   const displayName = stockInfo?.name ?? name ?? ''
@@ -150,12 +178,17 @@ export function StockInfoBar({
       case 'market_cap':       return marketCap != null ? fmtBigNum(marketCap) : null
       case 'float_market_cap': return floatMarketCap != null ? fmtBigNum(floatMarketCap) : null
       case 'turnover':         return turnoverRate != null ? `${turnoverRate.toFixed(2)}%` : null
-      case 'volume':           return latest.volume != null ? fmtVolume(Number(latest.volume)) : null
+      case 'volume': {
+        // 实时量优先（手，与日K同口径）
+        const v = rtVolume != null && rtVolume > 0 ? rtVolume : latest.volume
+        return v != null ? fmtVolume(Number(v)) : null
+      }
       case 'amplitude': {
-        const prevClose = prev ? Number(prev.close) : null
+        // 振幅：(最高-最低)/昨收；昨收用实时快照权威值
+        const prevClose = baseClose
         if (prevClose == null || prevClose === 0) return null
-        const hi = Number(latest.high)
-        const lo = Number(latest.low)
+        const hi = rtHigh != null && rtHigh > 0 ? rtHigh : Number(latest.high)
+        const lo = rtLow != null && rtLow > 0 ? rtLow : Number(latest.low)
         return `${((hi - lo) / prevClose * 100).toFixed(2)}%`
       }
       case 'open': return fmtPrice(Number(latest.open))

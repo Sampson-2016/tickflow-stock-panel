@@ -38,7 +38,7 @@ interface Props {
  *   （专业软件的分钟成交量），同时分时均价线（Σamount ÷ Σvolume股）可真实计算
  * - 只输出当前已发生的分钟点（不会铺满全日）→ 体现"按频率逐步生成"
  */
-function aggregateTicksToMinuteRows(
+export function aggregateTicksToMinuteRows(
   ticks: Array<Record<string, unknown>>,
 ): MinuteKlineRow[] {
   const sorted = ticks
@@ -163,15 +163,15 @@ export function StockIntradayChart({
   // tick 路径渲染：只展示当前已发生的 tick，曲线随时间推进延伸
   if (useTickPath) {
     const isMock = intradayKind === 'mock'
-    // 昨收回退：调用方未传 prevClose 时（测试页/持仓T/超买超卖页），从 tick 行的
-    // prev_close 字段取（RealtimeStore 快照自带）。不回退会导致百分比轴以
-    // 首个 tick 价格为基准，mock 与真实昨收不一致时出现 ±90%+ 的荒谬百分比。
-    const tickPrevClose = prevClose ?? (() => {
+    // 昨收基线（tick 路径）：优先用 tick 行自带的 prev_close（实时快照权威值），
+    // 调用方传入的 prevClose（StockPanel 取自本地日K，可能滞后）仅作回退。
+    // 之前反向优先级导致本地日K未更新时基线过期，出现如 -0.86% 的错误百分比。
+    const tickPrevClose = (() => {
       for (const t of ticks) {
         const v = Number(t.prev_close ?? 0)
         if (v > 0 && Number.isFinite(v)) return v
       }
-      return undefined
+      return prevClose
     })()
     return (
       <div className={className} style={{ height, flexShrink: 0 }}>

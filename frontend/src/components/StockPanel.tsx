@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import { type KlineRow, type FinancialMetricRecord } from '@/lib/api'
+import { api, type KlineRow, type FinancialMetricRecord } from '@/lib/api'
+import { useFreeRealtimeIntradayRefetchMs } from '@/custom/free_realtime/hooks'
 import { StockInfoBar } from '@/components/StockInfoBar'
 import { StockDailyKChart, getDefaultRange, type StockDailyKChartResult } from '@/components/StockDailyKChart'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
@@ -144,6 +146,33 @@ export function StockPanel({
   // 财务指标最新一期（metrics 按 period_end 排序，取首项）
   const financialMetrics: FinancialMetricRecord | undefined = financials.data?.data?.[0]
 
+  // ── 信息条实时覆盖 ──
+  // 与 StockDailyKChart 的今日实时蜡烛共享同一 queryKey（react-query 去重，不发额外请求），
+  // 取最新 tick 的快照字段传给信息条；无实时数据时 realtime 各字段缺省，信息条回退本地日K。
+  const refetchMs = useFreeRealtimeIntradayRefetchMs()
+  const liveTickQ = useQuery({
+    queryKey: ['free-realtime', 'intraday', symbol, 'real'],
+    queryFn: () => api.freeRealtimeIntraday(symbol, 'real'),
+    enabled: !!symbol,
+    refetchInterval: refetchMs,
+  })
+  const realtime = useMemo(() => {
+    const ticks = (liveTickQ.data?.rows ?? []) as Array<Record<string, unknown>>
+    if (ticks.length === 0) return undefined
+    const num = (k: string): number | undefined => {
+      const v = Number(ticks[ticks.length - 1][k])
+      return Number.isFinite(v) && v > 0 ? v : undefined
+    }
+    return {
+      price: num('last_price'),
+      prevClose: num('prev_close'),
+      open: num('open'),
+      high: num('high'),
+      low: num('low'),
+      volumeHands: num('volume'),
+    }
+  }, [liveTickQ.data])
+
   return (
     <div className={className}>
       <StockInfoBar
@@ -151,6 +180,7 @@ export function StockPanel({
         name={dailyResult?.name}
         stockInfo={stockInfo}
         rows={rawRows}
+        realtime={realtime}
         fields={fields}
         onFieldsChange={handleFieldsChange}
         financialMetrics={financialMetrics}

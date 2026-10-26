@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, type KlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { aggregateTicksToMinuteRows } from '@/components/StockIntradayChart'
+import { useFreeRealtimeIntradayRefetchMs } from '@/custom/free_realtime/hooks'
 import { storage } from '@/lib/storage'
 import {
   EChartsCandlestick,
@@ -153,7 +155,48 @@ export function StockDailyKChart({
     placeholderData: (prev) => prev,
   })
 
-  const rows = useMemo(() => toOHLC(kline.data?.rows ?? []), [kline.data?.rows])
+  // ── 今日实时蜡烛（免费实时行情 tick 合成）──
+  // 落库日K通常盘后才同步，盘中最后一根 K 线缺失/滞后。这里拉今日实时 tick
+  // 聚合成当日 OHLC 拼到日K末尾；盘后日K同步出今日行后（落库行日期 >= 合成行），
+  // 自动以落库数据为准，合成蜡烛自然消失。轮询节奏跟随调度器/测试页循环。
+  const refetchMs = useFreeRealtimeIntradayRefetchMs()
+  const todayStr = new Date().toLocaleDateString('sv-SE') // YYYY-MM-DD（本地时区）
+  const liveTickQ = useQuery({
+    queryKey: ['free-realtime', 'intraday', symbol, 'real'],
+    queryFn: () => api.freeRealtimeIntraday(symbol, 'real'),
+    enabled: !!symbol,
+    refetchInterval: refetchMs,
+  })
+  const liveMinuteRows = useMemo(
+    () => aggregateTicksToMinuteRows((liveTickQ.data?.rows ?? []) as Array<Record<string, unknown>>),
+    [liveTickQ.data],
+  )
+  const liveToday = useMemo(() => {
+    if (liveMinuteRows.length === 0) return undefined
+    const open = liveMinuteRows[0].open
+    let high = -Infinity
+    let low = Infinity
+    let volume = 0
+    let amount = 0
+    for (const r of liveMinuteRows) {
+      if (r.high > high) high = r.high
+      if (r.low < low) low = r.low
+      volume += r.volume
+      amount += r.amount
+    }
+    const close = liveMinuteRows[liveMinuteRows.length - 1].close
+    return { date: todayStr, open, high, low, close, volume, change_pct: undefined }
+  }, [liveMinuteRows, todayStr])
+
+  // 合并：仅当落库日K最后一根早于今天（今日未落库）且实时合成行有效时追加；
+  // 落库已有今日行（盘后同步完成）则以落库为准，不做任何覆盖。
+  const rows = useMemo(() => {
+    const base = toOHLC(kline.data?.rows ?? [])
+    if (!liveToday || base.length === 0) return base
+    const lastDate = base[base.length - 1].date
+    if (lastDate >= todayStr) return base
+    return [...base, liveToday]
+  }, [kline.data?.rows, liveToday, todayStr])
   const stockInfo = kline.data?.stock_info
   const limitMarkers = useMemo(() => buildLimitUpMarkers(kline.data?.rows ?? []), [kline.data?.rows])
   const allMarkers = useMemo(() => [
