@@ -660,11 +660,41 @@ class SignalStore:
                 self._prune_locked()
 
     def list_recent(self, limit: int = 50) -> list[dict[str, Any]]:
-        """返回最近 limit 条, 时间倒序。"""
+        """返回最近 limit 条, 时间倒序。
+
+        进程内存 deque 在服务重启后清空，而 JSONL 落盘文件仍在；
+        内存条数不足 limit 时从 JSONL 尾部补齐，避免重启后页面看不到
+        近期信号（飞书推送仍在发，但列表为空的割裂体验）。
+        """
         with self._lock:
             items = list(self._recent)
-        items.reverse()
-        return items[: max(1, min(limit, self._max))]
+            need = max(0, limit - len(items))
+            disk_tail: list[dict[str, Any]] = []
+            if need > 0:
+                try:
+                    lines = self._path.read_text(encoding="utf-8").splitlines()
+                    seen = {(r.get("ts_ms"), r.get("symbol"), r.get("kind")) for r in items}
+                    for ln in reversed(lines):
+                        if need <= 0:
+                            break
+                        try:
+                            rec = json.loads(ln)
+                        except json.JSONDecodeError:
+                            continue
+                        key = (rec.get("ts_ms"), rec.get("symbol"), rec.get("kind"))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        disk_tail.append(rec)
+                        need -= 1
+                except OSError:
+                    pass
+        items.reverse()          # 内存段（旧→新）
+        disk_tail.reverse()      # 磁盘段（旧→新）
+        # 合并去重后按时间倒序输出；旧记录排前，保证最新信号在前
+        merged = items + disk_tail
+        merged.sort(key=lambda r: r.get("ts_ms") or 0, reverse=True)
+        return merged[: max(1, min(limit, self._max))]
 
     def _prune_locked(self) -> None:
         """(调用方持锁) 保留最近 max_records 行, 避免文件无限膨胀。"""

@@ -32,7 +32,7 @@ def client(app):
 
 
 @pytest.fixture(autouse=True)
-def _reset_test_state():
+def _reset_test_state(tmp_path):
     saved = dict(free_realtime_ext._test_state)
     free_realtime_ext._test_state["mock_running"] = False
     free_realtime_ext._test_state["real_loop_running"] = False
@@ -41,7 +41,10 @@ def _reset_test_state():
     free_realtime_ext._test_state["real_thread"] = None
     try:
         from app.services.free_realtime.scheduler import FreeRealtimeScheduler
-        FreeRealtimeScheduler.get_instance().store().clear_kind("mock")
+        from app.services.free_realtime.store import RealtimeStore
+        # 用 tmp_path 隔离的 store 替换单例 store：clear_kind 只清测试数据，
+        # 绝不能清真实 DATA_DIR 的落盘（历史 bug：跑测试把当日实时 tick 全删了）。
+        FreeRealtimeScheduler.get_instance()._store = RealtimeStore(tmp_path)
     except Exception:
         pass
     yield
@@ -161,11 +164,7 @@ class TestSignalsEvaluate:
 
     def test_returns_empty_when_no_ticks(self, client):
         """有标的但 store 无 tick → 返回空。"""
-        from app.services.free_realtime.scheduler import FreeRealtimeScheduler
-        scheduler = FreeRealtimeScheduler.get_instance()
-        # 清空 store
-        scheduler.store().clear_kind("real")
-        scheduler.store().clear_kind("mock")
+        # store 已由 fixture 替换为 tmp_path 隔离实例，天然为空，无需 clear
         with patch(
             "app.services.free_realtime.config.list_overbought_enabled_symbols",
             return_value=["600000.SH"],
