@@ -484,6 +484,9 @@ export function PositionTPage() {
                           const t = new Date(s.ts_ms)
                           const hhmmss = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}:${String(t.getSeconds()).padStart(2, '0')}`
                           const buy = s.side !== 'sell'
+                          // 策略名与上方「信号配置」勾选项同名（key 与后端 TSignal.kind 一致）
+                          const strategyLabel =
+                            STRATEGY_OPTIONS.find((o) => o.key === s.kind)?.label ?? s.kind
                           return (
                             <button
                               key={`${s.ts_ms}-${s.symbol}-${s.kind}-${i}`}
@@ -504,6 +507,9 @@ export function PositionTPage() {
                               <span className="min-w-0">
                                 <span className="font-medium">{s.name || s.symbol}</span>
                                 <span className="text-muted ml-1.5 font-mono">{hhmmss}</span>
+                                <span className="ml-1.5 px-1 rounded bg-muted/40 text-muted text-[10px]">
+                                  {strategyLabel}
+                                </span>
                                 <span className="block text-muted truncate" title={s.detail}>{s.detail}</span>
                               </span>
                             </button>

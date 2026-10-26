@@ -31,52 +31,72 @@ interface Props {
 
 /** 把 RealtimeStore 的 tick 行（last_price + ts_ms）按分钟聚合成 MinuteKlineRow。
  *
- * - 同 HH:mm 取最后一个 tick → 1 个 row（与后端 store 同分钟去重口径一致）
+ * - 分钟内第一个/最后一个 tick → open/close，分钟内极值 → high/low
+ * - 成交量/成交额口径自动判别：真实源（新浪/腾讯/东财快照）的 volume/amount
+ *   是「当日累计值」，mock 是「单 tick 增量」。整日 volume 单调不减 → 累计口径，
+ *   按 tick 差值折算分钟增量；否则直接求和。保证两种数据源的分钟量柱口径一致
+ *   （专业软件的分钟成交量），同时分时均价线（Σamount ÷ Σvolume股）可真实计算
  * - 只输出当前已发生的分钟点（不会铺满全日）→ 体现"按频率逐步生成"
- * - prevClose 缺失时用第一笔 tick 的 last_price 兜底，保证 EChartsIntraday 可渲染
  */
 function aggregateTicksToMinuteRows(
   ticks: Array<Record<string, unknown>>,
-  prevClose?: number,
 ): MinuteKlineRow[] {
-  if (!ticks.length) return []
-  const byMinute = new Map<string, { price: number; volume: number; ts: number }>()
-  for (const t of ticks) {
-    const tsMs = Number(t.ts_ms ?? 0)
-    if (!tsMs) continue
-    const price = Number(t.last_price ?? 0)
-    if (!price) continue
+  const sorted = ticks
+    .map((t) => ({
+      tsMs: Number(t.ts_ms ?? 0),
+      price: Number(t.last_price ?? 0),
+      volume: Number(t.volume ?? 0),
+      amount: Number(t.amount ?? 0),
+    }))
+    .filter((t) => t.tsMs > 0 && t.price > 0)
+    .sort((a, b) => a.tsMs - b.tsMs)
+  if (!sorted.length) return []
+  // 累计口径判别：volume 全程单调不减 → 快照累计值；少量 tick 时不判别（易误判）
+  const cumulative =
+    sorted.length >= 5 &&
+    sorted.every((t, i) => i === 0 || t.volume >= sorted[i - 1].volume)
+  interface MinuteAcc {
+    open: number
+    close: number
+    high: number
+    low: number
+    volume: number
+    amount: number
+  }
+  const byMinute = new Map<string, MinuteAcc>()
+  let prevVol = 0
+  let prevAmt = 0
+  for (const t of sorted) {
     // 后端 ts_ms 是北京时间 tick 时间戳；EChartsIntraday 的 datetime 用 UTC
     // （组件内部 formatMinuteTime 会 +8 显示）。北京 HH:mm → UTC HH:mm-8。
-    const d = new Date(tsMs)
-    const hh = String(d.getUTCHours()).padStart(2, '0')
-    const mm = String(d.getUTCMinutes()).padStart(2, '0')
-    const key = `${hh}:${mm}`
-    const volume = Number(t.volume ?? 0)
-    if (!byMinute.has(key) || tsMs >= (byMinute.get(key)?.ts ?? 0)) {
-      byMinute.set(key, { price, volume, ts: tsMs })
+    const d = new Date(t.tsMs)
+    const key = `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`
+    const volDelta = cumulative ? Math.max(0, t.volume - prevVol) : t.volume
+    const amtDelta = cumulative ? Math.max(0, t.amount - prevAmt) : t.amount
+    prevVol = t.volume
+    prevAmt = t.amount
+    let acc = byMinute.get(key)
+    if (!acc) {
+      acc = { open: t.price, close: t.price, high: t.price, low: t.price, volume: 0, amount: 0 }
+      byMinute.set(key, acc)
     }
+    acc.close = t.price
+    if (t.price > acc.high) acc.high = t.price
+    if (t.price < acc.low) acc.low = t.price
+    acc.volume += volDelta
+    acc.amount += amtDelta
   }
-  // 按时间排序，构造 MinuteKlineRow：open/high/low/close 全部 = last_price
-  // （tick 视图只有 last_price 一个标量，K 线四要素不可得；EChartsIntraday 渲染分时线只看 close）
-  const base = prevClose && prevClose > 0 ? prevClose : (ticks[0]?.last_price as number) || 1
   const rows: MinuteKlineRow[] = []
-  let lastClose = base
-  for (const [key, info] of Array.from(byMinute.entries()).sort()) {
-    const close = info.price
-    const open = lastClose
-    const high = Math.max(open, close)
-    const low = Math.min(open, close)
+  for (const [key, acc] of Array.from(byMinute.entries()).sort()) {
     rows.push({
       datetime: `${key}:00Z`,
-      open: Number(open.toFixed(2)),
-      high: Number(high.toFixed(2)),
-      low: Number(low.toFixed(2)),
-      close: Number(close.toFixed(2)),
-      volume: Math.max(0, Math.floor(info.volume)),
-      amount: 0,
+      open: Number(acc.open.toFixed(2)),
+      high: Number(acc.high.toFixed(2)),
+      low: Number(acc.low.toFixed(2)),
+      close: Number(acc.close.toFixed(2)),
+      volume: Math.max(0, Math.floor(acc.volume)),
+      amount: Math.max(0, Math.round(acc.amount)),
     })
-    lastClose = close
   }
   return rows
 }
@@ -120,8 +140,8 @@ export function StockIntradayChart({
   // 否则条件切换时 React hook 调用顺序错乱，会导致 tickRows 不更新或走错分支。
   const ticks = (tickQ.data?.rows ?? []) as Array<Record<string, unknown>>
   const tickRows = useMemo(
-    () => aggregateTicksToMinuteRows(ticks, prevClose),
-    [ticks, prevClose],
+    () => aggregateTicksToMinuteRows(ticks),
+    [ticks],
   )
 
   const fetchMinute = useMutation({

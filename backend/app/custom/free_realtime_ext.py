@@ -91,15 +91,22 @@ def get_status() -> dict:
 @router.post("/start")
 def post_start() -> dict:
     scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
+    # 右上角「启动」按钮即全局开关的用户入口：自动置位 enabled，
+    # 不再要求用户先到配置里勾选全局开关（否则按钮永远报"全局开关未开启"）。
     if not fr_config.get_global_enabled():
-        raise HTTPException(status_code=400, detail="全局开关未开启")
+        fr_config.set_global_enabled(True)
     return scheduler.start()
 
 
 @router.post("/stop")
 def post_stop() -> dict:
     scheduler = fr_scheduler.FreeRealtimeScheduler.get_instance()
-    return scheduler.stop()
+    result = scheduler.stop()
+    # 停止时同步关掉全局开关，保持「按钮状态 = enabled 配置」一致，
+    # 避免重启服务时 auto_start_if_enabled 又把调度器拉起来。
+    if fr_config.get_global_enabled():
+        fr_config.set_global_enabled(False)
+    return result
 
 
 @router.post("/prune")

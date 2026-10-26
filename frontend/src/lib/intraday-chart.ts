@@ -21,6 +21,15 @@ export function volItemStyle(close: number, open: number): string {
       : 'rgba(161,161,170,0.5)'
 }
 
+/** 成交量轴/悬浮提示格式化：≥1亿 → x.xx亿，≥1万 → x.x万，其余原值（单位：手） */
+export function formatVolumeCN(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—'
+  const abs = Math.abs(v)
+  if (abs >= 1e8) return `${(v / 1e8).toFixed(2)}亿`
+  if (abs >= 1e4) return `${(v / 1e4).toFixed(1)}万`
+  return String(Math.round(v))
+}
+
 /** 分时价格线下方渐变面积样式 */
 export function intradayAreaStyle(areaColor: string): any {
   return {
@@ -120,7 +129,17 @@ export function computeIntradayAverage(data: MinuteKlineRow[]): number[] {
   for (const row of data) {
     amount += row.amount
     volume += row.volume * 100
-    result.push(volume > 0 ? amount / volume : row.close)
+    if (volume <= 0) {
+      result.push(row.close)
+      continue
+    }
+    const avg = amount / volume
+    // 均价相对现价偏离 >30% 视为口径脏数据 (如成交额与成交量单位不匹配的
+    // mock 历史数据), 该点回退为现价, 避免把价格/百分比轴拉到 0~680 这类
+    // 离谱范围; 累计口径不重置, 数据源正常后均价自然贴合
+    result.push(
+      row.close > 0 && Math.abs(avg - row.close) / row.close <= 0.3 ? avg : row.close,
+    )
   }
   return result
 }

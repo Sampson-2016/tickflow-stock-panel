@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, useMemo } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
+import { formatVolumeCN } from '@/lib/intraday-chart'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 
@@ -127,7 +128,8 @@ export const SUB_CHARTS: SubChartDef[] = [
     key: 'vol',
     label: '成交量',
     height: 84,
-    yAxisConfig: { min: 0 },
+    // axisLabelFormatter 由通用 yAxis 组装逻辑取用：成交量轴刻度按 万/亿 手格式化
+    yAxisConfig: { min: 0, axisLabelFormatter: formatVolumeCN },
     buildSeries: (data, context) => {
       const ma5Data = volMaN(data, 5)
       const ma10Data = volMaN(data, 10)
@@ -589,6 +591,15 @@ function buildOption(
     axisLine: { show: false }, axisTick: { show: false },
     splitLine: { lineStyle: { color: CT().grid } },
     axisLabel: { color: CT().text, fontSize: 10, fontFamily: 'JetBrains Mono, monospace' },
+    // 十字线价格标签固定两位小数，避免悬停时出现 566.04938271 这类原始浮点
+    axisPointer: {
+      label: {
+        formatter: (params: any) =>
+          typeof params?.value === 'number' && Number.isFinite(params.value)
+            ? params.value.toFixed(2)
+            : '',
+      },
+    },
   })
   xAxisIndices.push(0)
 
@@ -733,6 +744,15 @@ function buildOption(
     })
 
     const isFixedRange = !!def.yAxisConfig
+    // 成交量等子图可携带 axisLabelFormatter（如 万/亿 手）；无则固定两位小数
+    const axisLabelFormatter: ((v: number) => string) | undefined =
+      (def.yAxisConfig as { axisLabelFormatter?: (v: number) => string } | undefined)
+        ?.axisLabelFormatter
+    const pointerFormatter = (params: any) => {
+      const v = params?.value
+      if (typeof v !== 'number' || !Number.isFinite(v)) return ''
+      return axisLabelFormatter ? axisLabelFormatter(v) : v.toFixed(2)
+    }
     yAxes.push({
       scale: !isFixedRange,
       ...(isFixedRange ? def.yAxisConfig : {}),
@@ -743,7 +763,9 @@ function buildOption(
       axisLabel: {
         show: true, color: CT().text, fontSize: 9,
         fontFamily: 'JetBrains Mono, monospace',
+        ...(axisLabelFormatter ? { formatter: axisLabelFormatter } : {}),
       },
+      axisPointer: { label: { formatter: pointerFormatter } },
     })
 
     xAxisIndices.push(xAxisIdx)

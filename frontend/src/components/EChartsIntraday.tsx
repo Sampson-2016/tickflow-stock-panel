@@ -8,6 +8,7 @@ import {
   crosshairLabelStyle,
   dashedCrosshairStyle,
   formatMinuteTime,
+  formatVolumeCN,
   FULL_DAY_TIMES,
   FULL_DAY_TIMES_WITH_CALL,
   intradayAreaStyle,
@@ -259,6 +260,8 @@ function buildTickOption(
     // 分钟模式同样给柱宽上限，防止数据稀疏时巨柱
     barMaxWidth: 6,
     barMinWidth: 1,
+    // 悬浮提示成交量按 万/亿 手格式化，避免默认 tooltip 显示原始长数字
+    tooltip: { valueFormatter: (v: number) => formatVolumeCN(v) },
     data: volPairs.map(([t, v], i) => ({
       value: [t, v],
       itemStyle: { color: volItemStyle(data[i].close, data[i].open) },
@@ -353,7 +356,14 @@ function buildTickOption(
             },
           },
         },
-        axisLabel: { color: ct.text, fontSize: 10, fontFamily: 'JetBrains Mono, monospace' },
+        // min/max/interval 均为浮点计算值(如 pctAxis.priceMin = prevClose*(1+lo/100))时,
+        // ECharts 会按原始浮点打印刻度(如 499.48934), 必须显式格式化为两位小数
+        axisLabel: {
+          color: ct.text,
+          fontSize: 10,
+          fontFamily: 'JetBrains Mono, monospace',
+          formatter: (v: number) => v.toFixed(2),
+        },
       },
       {
         type: 'value',
@@ -363,7 +373,16 @@ function buildTickOption(
         axisLine: { show: false },
         axisTick: { show: false },
         splitLine: { lineStyle: { color: ct.grid } },
-        axisLabel: { color: ct.text, fontSize: 10, fontFamily: 'JetBrains Mono, monospace' },
+        // 成交量轴刻度按 万/亿 手格式化，避免出现 300000002 这种原始长数字
+        axisPointer: {
+          label: { formatter: (params: any) => formatVolumeCN(params?.value) },
+        },
+        axisLabel: {
+          color: ct.text,
+          fontSize: 10,
+          fontFamily: 'JetBrains Mono, monospace',
+          formatter: (v: number) => formatVolumeCN(v),
+        },
       },
       // 右侧百分比轴: 与左侧价格轴同范围, 刻度即涨跌幅。
       // 注意必须追加在数组末尾(yAxisIndex 2): 成交量 series 固定引用 yAxisIndex 1,
@@ -944,7 +963,7 @@ export function EChartsIntraday({
                 <span style={{ color: THEME.avgLine }}>{avg?.toFixed(2)}</span>
               </span>}
               <span className="text-muted">量</span>
-              <span className="text-secondary">{d.volume.toFixed(0)}</span>
+              <span className="text-secondary">{formatVolumeCN(d.volume)}</span>
               <span className="text-muted">额</span>
               <span className="text-secondary">{fmtAmt(d.amount)}</span>
             </>
