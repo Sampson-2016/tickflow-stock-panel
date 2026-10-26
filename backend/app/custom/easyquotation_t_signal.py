@@ -476,8 +476,13 @@ class SignalEvaluator:
             amount = self._safe_float(raw.get("amount"))
             vol = self._safe_float(raw.get("volume"))
             if amount is not None and vol is not None and vol > 0:
-                vwap = amount / vol
-                if vwap > 0:
+                # volume 口径为"手"（100 股/手，三源 normalizer 已统一），amount 为"元"，
+                # 均价 = 累计成交额 / 累计成交量(股) = amount / (volume * 100)。
+                # 此前漏乘 100 导致均价放大百倍（如 28039），偏离度恒超阈值产生垃圾信号。
+                vwap = amount / (vol * 100.0)
+                # 合理性校验：均价必须落在 [0.5×, 1.5×] 现价区间内，
+                # 防御字段口径异常（ETF/基金量纲差异、源字段错位）产生垃圾信号。
+                if vwap > 0 and now_price * 0.5 <= vwap <= now_price * 1.5:
                     dev_pct = (now_price - vwap) / vwap * 100.0
                     if abs(dev_pct) >= self.VWAP_REVERT_PCT:
                         tendency = "卖出" if dev_pct > 0 else "买入"
