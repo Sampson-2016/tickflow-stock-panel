@@ -360,12 +360,15 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
 
   const handleDownload = async () => {
     if (!strategyId || !detail || (detail.source !== 'ai' && detail.source !== 'custom')) return
-    const src = await api.strategyGetSource(strategyId)
-    const blob = new Blob([src.code], { type: 'text/x-python;charset=utf-8' })
+    // 导出完整策略包: 源代码 + 用户修改后的基础参数/策略参数/评分/信号/止损/范围等
+    const bundle = await api.strategyExport(strategyId)
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${strategyId}.py`
+    a.download = `${strategyId}.json`
     document.body.appendChild(a)
     a.click()
     a.remove()
@@ -394,7 +397,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
               {detail && (detail.source === 'ai' || detail.source === 'custom') && (
                 <button
                   aria-label="下载策略"
-                  title="下载策略"
+                  title="下载完整策略（含当前参数配置）"
                   onClick={handleDownload}
                   className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border border-border/60 bg-surface text-xs text-secondary hover:text-accent hover:border-accent/30 transition-colors cursor-pointer"
                 >

@@ -718,6 +718,18 @@ export interface StrategyDetail {
 
 export type ScoringDirection = 'high' | 'low'
 
+/** 策略完整导出包: 源代码 + 用户修改过的配置 (基础参数/策略参数/评分/信号/止损/范围等)。 */
+export interface StrategyExportBundle {
+  version: number
+  exported_at: string
+  strategy_id: string
+  source: 'ai' | 'custom'
+  name: string
+  description: string
+  code: string
+  config: Record<string, any>
+}
+
 export interface StrategyBuildResult {
   code: string
   meta: Record<string, any>
@@ -3065,6 +3077,10 @@ export const api = {
   /** 获取策略源文件内容 */
   strategyGetSource: (id: string) =>
     request<{ code: string; source: string }>(`/api/strategies/${id}/source`),
+
+  /** 导出完整策略 (代码 + 当前生效的用户配置), 用于备份或跨环境迁移 */
+  strategyExport: (id: string) =>
+    request<StrategyExportBundle>(`/api/strategies/${id}/export`),
   strategyBuild: (step: number, payload: Record<string, any>) =>
     request<StrategyBuildResult>(
       '/api/strategies/build',

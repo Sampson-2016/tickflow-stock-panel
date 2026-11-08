@@ -1,8 +1,9 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
-import { X, Plus, GripVertical, Upload, Loader2 } from 'lucide-react'
-import { api, type StrategyDetail } from '@/lib/api'
+import { X, Plus, GripVertical, Upload, Loader2, Trash2 } from 'lucide-react'
+import { api, type StrategyDetail, type StrategyExportBundle } from '@/lib/api'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
+import { Modal } from '@/components/Modal'
 
 interface Props {
   pool: string[]
@@ -52,6 +53,10 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState('')
   const [importMsg, setImportMsg] = useState('')
+  // 删除自定义策略: 待确认目标 + 状态
+  const [deleteTarget, setDeleteTarget] = useState<StrategyDetail | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const loadStrategies = useCallback(async () => {
@@ -101,6 +106,24 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
     setDraftPool(prev => prev.filter(x => x !== id))
   }, [])
 
+  // 删除自定义/AI 策略文件 (内置/叠加策略后端会拒绝); 成功后刷新待选列表并从草稿池移除
+  const handleDelete = async () => {
+    if (!deleteTarget) return
+    setDeleting(true)
+    setDeleteError('')
+    try {
+      await api.strategyDelete(deleteTarget.id)
+      handleRemove(deleteTarget.id)
+      setDeleteTarget(null)
+      await loadStrategies()
+    } catch (e: any) {
+      // request() 已弹 toast, 这里在确认框内保留错误信息便于重试
+      setDeleteError(String(e?.message ?? '删除失败,请重试'))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   const handleReorder = useCallback((newOrder: string[]) => {
     setDraftPool(newOrder)
   }, [])
@@ -108,13 +131,34 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
   const handleImportFile = useCallback(async (file: File) => {
     setImporting(true); setImportError(''); setImportMsg('')
     try {
-      if (!file.name.toLowerCase().endsWith('.py')) throw new Error('只能导入 .py 策略文件')
-      const code = await file.text()
-      const rawId = parseMetaId(code) || fileStem(file.name)
-      if (!rawId) throw new Error('无法识别策略 ID，请检查 META.id 或文件名')
-      const target: 'ai' | 'custom' = rawId.startsWith('ai_') ? 'ai' : 'custom'
+      const lowerName = file.name.toLowerCase()
+      let code: string
+      let rawId: string
+      let config: Record<string, any> | null = null
+      let bundleSource: string | undefined
+
+      if (lowerName.endsWith('.json')) {
+        // 完整策略包: 代码 + 用户修改后的配置 (由「下载策略」导出)
+        const bundle = JSON.parse(await file.text()) as Partial<StrategyExportBundle>
+        if (!bundle || typeof bundle.code !== 'string' || !bundle.code) {
+          throw new Error('JSON 文件缺少策略代码 (code)')
+        }
+        code = bundle.code
+        rawId = String(bundle.strategy_id ?? '') || parseMetaId(code) || fileStem(file.name)
+        config = bundle.config && typeof bundle.config === 'object' ? bundle.config : null
+        bundleSource = bundle.source
+      } else if (lowerName.endsWith('.py')) {
+        code = await file.text()
+        rawId = parseMetaId(code) || fileStem(file.name)
+      } else {
+        throw new Error('只能导入 .json 完整策略包或 .py 策略文件')
+      }
+
+      if (!rawId) throw new Error('无法识别策略 ID，请检查 strategy_id / META.id 或文件名')
+      const target: 'ai' | 'custom' =
+        bundleSource === 'ai' || rawId.startsWith('ai_') ? 'ai' : 'custom'
       const strategyId = target === 'ai'
-        ? rawId
+        ? (rawId.startsWith('ai_') ? rawId : `ai_${rawId}`)
         : (rawId.startsWith('custom_') ? rawId : `custom_${rawId}`)
       const result = await api.strategySaveCodeV2({
         strategy_id: strategyId,
@@ -122,9 +166,13 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
         target_source: target,
         mode: 'create',
       })
+      // 完整策略包: 恢复用户修改的基础参数/策略参数/评分/信号/止损/范围等
+      if (config && Object.keys(config).length > 0) {
+        await api.strategySaveConfig(strategyId, config)
+      }
       await loadStrategies()
       setActiveTab(result.source === 'ai' ? 'ai' : 'custom')
-      setImportMsg(`已导入到${result.source === 'ai' ? 'AI' : '自定义'}策略: ${result.strategy_id}`)
+      setImportMsg(`已导入${config ? '完整配置' : ''}到${result.source === 'ai' ? 'AI' : '自定义'}策略: ${result.strategy_id}`)
     } catch (e: any) {
       setImportError(String(e?.message ?? '导入失败'))
     } finally {
@@ -159,7 +207,7 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".py,text/x-python,text/plain"
+                accept=".json,.py,application/json,text/x-python,text/plain"
                 className="hidden"
                 onChange={e => {
                   const file = e.target.files?.[0]
@@ -169,6 +217,7 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={importing}
+                title="导入 .json 完整策略包（含参数配置）或 .py 策略文件"
                 className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-btn border border-accent/30 bg-accent/10 text-accent text-xs font-medium hover:bg-accent/15 disabled:opacity-50 transition-colors cursor-pointer"
               >
                 {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
@@ -221,23 +270,33 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
                       {available.length === 0 ? '全部已加入策略池' : '此分组无待选策略'}
                     </div>
                   ) : filteredAvailable.map(s => (
-                    <button
-                      key={s.id}
-                      onClick={() => handleAdd(s.id)}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-btn
-                        hover:bg-accent/8 transition-colors cursor-pointer group text-left"
-                    >
-                      <span className="flex-1 min-w-0">
-                        <span className="text-[12px] text-foreground group-hover:text-accent transition-colors block truncate">
-                          {s.name} <span className="text-[10px] text-muted font-mono">{s.id}</span>
+                    <div key={s.id} className="flex items-center gap-0.5">
+                      <button
+                        onClick={() => handleAdd(s.id)}
+                        className="flex-1 min-w-0 flex items-center gap-2 px-2.5 py-1.5 rounded-btn
+                          hover:bg-accent/8 transition-colors cursor-pointer group text-left"
+                      >
+                        <span className="flex-1 min-w-0">
+                          <span className="text-[12px] text-foreground group-hover:text-accent transition-colors block truncate">
+                            {s.name} <span className="text-[10px] text-muted font-mono">{s.id}</span>
+                          </span>
+                          <span className="text-[10px] text-muted truncate block">{s.description}</span>
                         </span>
-                        <span className="text-[10px] text-muted truncate block">{s.description}</span>
-                      </span>
-                      <span className={`text-[8px] px-1 py-px rounded border leading-tight shrink-0 ${SOURCE_CLS[s.source] ?? SOURCE_CLS.builtin}`}>
-                        {SOURCE_LABEL[s.source] ?? '内置'}
-                      </span>
-                      <Plus className="h-3.5 w-3.5 text-muted/40 group-hover:text-accent shrink-0" />
-                    </button>
+                        <span className={`text-[8px] px-1 py-px rounded border leading-tight shrink-0 ${SOURCE_CLS[s.source] ?? SOURCE_CLS.builtin}`}>
+                          {SOURCE_LABEL[s.source] ?? '内置'}
+                        </span>
+                        <Plus className="h-3.5 w-3.5 text-muted/40 group-hover:text-accent shrink-0" />
+                      </button>
+                      {(s.source === 'custom' || s.source === 'ai') && (
+                        <button
+                          onClick={() => { setDeleteError(''); setDeleteTarget(s) }}
+                          className="p-1 rounded-btn text-muted/40 hover:text-danger hover:bg-danger/10 transition-colors cursor-pointer shrink-0"
+                          title="删除策略"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </div>
                   ))}
                 </div>
               </div>
@@ -280,6 +339,15 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
                             <span className={`text-[8px] px-1 py-px rounded border leading-tight shrink-0 ${SOURCE_CLS[src] ?? SOURCE_CLS.builtin}`}>
                               {SOURCE_LABEL[src] ?? '内置'}
                             </span>
+                            {(s?.source === 'custom' || s?.source === 'ai') && (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setDeleteError(''); setDeleteTarget(s) }}
+                                className="text-muted/40 hover:text-danger transition-colors cursor-pointer leading-none shrink-0"
+                                title="删除策略"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
                             <button
                               onClick={(e) => { e.stopPropagation(); handleRemove(id) }}
                               className="text-muted/40 hover:text-danger transition-colors cursor-pointer leading-none shrink-0"
@@ -316,6 +384,53 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
             </div>
           </div>
         </motion.div>
+
+        {/* 删除自定义策略确认 — 放在面板外, 避免被面板 overflow 裁剪 */}
+        {deleteTarget && (
+          <Modal
+            onClose={() => { if (!deleting) setDeleteTarget(null) }}
+            labelledBy="strategy-pool-delete-title"
+            overlayClassName="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+            panelClassName="w-[380px] bg-surface border border-border/50 rounded-2xl shadow-2xl p-5"
+          >
+            <div className="text-center space-y-3">
+              <div className="w-10 h-10 rounded-full bg-danger/10 flex items-center justify-center mx-auto">
+                <span className="text-danger text-lg">!</span>
+              </div>
+              <div>
+                <div id="strategy-pool-delete-title" className="text-sm font-semibold text-foreground">删除策略</div>
+                <div className="text-xs text-muted mt-1">
+                  确定要删除「{deleteTarget.name}」吗？
+                  <span className="ml-1 font-mono text-[10px] text-muted/60">{deleteTarget.id}</span>
+                </div>
+              </div>
+              <div className="text-[11px] text-danger/70 bg-danger/[0.04] rounded-lg px-3 py-2 border border-danger/10">
+                删除后无法恢复，策略文件、配置和关联数据将被永久清除。
+              </div>
+              {deleteError && (
+                <div className="text-[11px] text-danger bg-danger/10 rounded-lg px-3 py-2 border border-danger/20">
+                  {deleteError}
+                </div>
+              )}
+              <div className="flex gap-2 pt-2">
+                <button
+                  onClick={() => setDeleteTarget(null)}
+                  disabled={deleting}
+                  className="flex-1 h-8 rounded-lg border border-border text-xs text-secondary hover:text-foreground disabled:opacity-50 cursor-pointer"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => void handleDelete()}
+                  disabled={deleting}
+                  className="flex-1 h-8 rounded-lg bg-danger text-white text-xs font-medium hover:bg-danger/90 disabled:opacity-50 cursor-pointer"
+                >
+                  {deleting ? '删除中...' : '确认删除'}
+                </button>
+              </div>
+            </div>
+          </Modal>
+        )}
       </motion.div>
     </AnimatePresence>
   )

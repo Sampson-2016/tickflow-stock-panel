@@ -10,7 +10,7 @@ import logging
 import math
 import re
 from dataclasses import asdict
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -799,6 +799,38 @@ def get_strategy_source(strategy_id: str, request: Request):
         raise HTTPException(status_code=404, detail="策略源文件不存在")
 
     return {"code": path.read_text(encoding="utf-8"), "source": s.source}
+
+
+@router.get("/{strategy_id}/export")
+def export_strategy(strategy_id: str, request: Request):
+    """导出完整策略: 源代码 + 当前生效配置 (用户修改的基础/策略参数、评分、信号等)。
+
+    与 /source 的区别: /source 只返回代码(供 AI 修改), 这里额外带上 override,
+    下载后可在另一环境导入并完整还原用户配置。
+    """
+    engine = _get_engine(request)
+    data_dir = _data_dir(request)
+    s = _get_public_strategy(engine, strategy_id)
+    if s.source not in ("ai", "custom"):
+        raise HTTPException(status_code=400, detail="仅支持导出自定义/AI 策略")
+
+    path = s.file_path
+    if not path or not path.exists():
+        raise HTTPException(status_code=404, detail="策略源文件不存在")
+
+    overrides = strategy_config.load_override(data_dir, strategy_id)
+    detail = _strategy_detail(s, overrides or None, engine)
+    return {
+        "version": 1,
+        "exported_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "strategy_id": strategy_id,
+        "source": s.source,
+        "name": detail["name"],
+        "description": detail["description"],
+        "code": path.read_text(encoding="utf-8"),
+        # 用户修改过的配置; 代码内 META 已含默认值, 两者合起来即完整策略
+        "config": overrides,
+    }
 
 
 @router.post("/ai/test")
