@@ -766,6 +766,22 @@ def update_screener_result_columns(req: dict) -> dict:
     return {"columns": saved}
 
 
+@router.get("/preferences/strategy-pool")
+def get_strategy_pool() -> dict:
+    """返回策略池 (选股页已拉出的策略 ID, 跨浏览器一致)。"""
+    from app.services import preferences
+    return {"ids": preferences.get_strategy_pool()}
+
+
+@router.put("/preferences/strategy-pool")
+def update_strategy_pool(req: dict) -> dict:
+    """保存策略池。"""
+    from app.services import preferences
+    ids = [str(x) for x in req.get("ids", [])]
+    saved = preferences.set_strategy_pool(ids)
+    return {"ids": saved}
+
+
 @router.put("/preferences/minute-sync")
 def update_minute_sync(req: MinuteSyncPrefs) -> dict:
     """保存分钟 K 同步偏好。

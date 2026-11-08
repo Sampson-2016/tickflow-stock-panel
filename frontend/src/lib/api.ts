@@ -1947,6 +1947,14 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ columns }),
     }),
+  /** 策略池 (选股页已拉出的策略卡片, 存后端跨浏览器一致) */
+  strategyPool: () =>
+    request<{ ids: string[] }>('/api/settings/preferences/strategy-pool'),
+  strategyPoolSave: (ids: string[]) =>
+    request<{ ids: string[] }>('/api/settings/preferences/strategy-pool', {
+      method: 'PUT',
+      body: JSON.stringify({ ids }),
+    }),
 
   capabilities: () => request<CapabilitiesResponse>('/api/capabilities'),
   version: () => request<{ version: string }>('/api/data/version'),

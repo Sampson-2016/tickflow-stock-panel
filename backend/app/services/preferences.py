@@ -1005,6 +1005,20 @@ def set_screener_result_columns(columns: list[dict]) -> list[dict]:
     return columns
 
 
+# ===== 策略池 (选股页已拉出的策略卡片, 跨浏览器一致) =====
+
+def get_strategy_pool() -> list[str]:
+    """返回策略池中的策略 ID (有序)。"""
+    val = load().get("strategy_pool")
+    return val if isinstance(val, list) else []
+
+
+def set_strategy_pool(ids: list[str]) -> list[str]:
+    """保存策略池。"""
+    save({"strategy_pool": ids})
+    return ids
+
+
 # ===== 首次使用引导 =====
 
 def get_onboarding_completed() -> bool:
