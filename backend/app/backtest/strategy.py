@@ -480,6 +480,12 @@ _SHARE_CAP_FILTER_KEYS = (
     "float_cap_max",
 )
 
+# A 股板块过滤按股票代码前缀匹配 (60/00/300/301/688/8xx), ETF 代码
+# (沪 51/56/58, 深 15/16/18) 一个都匹配不上, 会把 ETF 全灭 —— 与市值界
+# 同语义: 对非股票资产置空 (engine._basic_filter_expr 的 polars 侧守卫
+# 只挡港美股后缀, 不挡 ETF)。
+_STOCK_ONLY_FILTER_KEYS = (*_SHARE_CAP_FILTER_KEYS, "boards")
+
 
 def _basic_filter_for_asset(basic_filter: dict, asset_type: str) -> dict:
     """非股票资产没有股本数据 (etf/index 维表只有 symbol/name), 市值与流通
@@ -493,7 +499,7 @@ def _basic_filter_for_asset(basic_filter: dict, asset_type: str) -> dict:
     if asset_type == "stock" or not basic_filter:
         return basic_filter
     sanitized = dict(basic_filter)
-    for key in _SHARE_CAP_FILTER_KEYS:
+    for key in _STOCK_ONLY_FILTER_KEYS:
         sanitized[key] = None
     return sanitized
 

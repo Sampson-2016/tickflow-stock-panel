@@ -762,6 +762,7 @@ export function Screener() {
                   onSettings={() => setSettingsStrategyId(s.id)}
                   monitored={strategyMonitorMap.has(s.id)}
                   onToggleMonitor={() => toggleStrategyMonitor(s.id, s.name)}
+                  scopeLabel={s.scope?.mode === 'watchlist' ? '自选' : s.scope?.mode === 'watchlist_group' ? '分组' : undefined}
                 />
               )
             })}

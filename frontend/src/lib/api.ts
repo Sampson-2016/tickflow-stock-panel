@@ -319,6 +319,8 @@ export interface ScreenerStrategy {
   name: string
   description: string
   source?: string
+  /** 选股范围 (override.scope): undefined/null=全市场 */
+  scope?: { mode: 'watchlist' } | { mode: 'watchlist_group'; group_ids: string[] } | null
 }
 
 export interface StrategyLoadError {
@@ -688,6 +690,8 @@ export interface StrategyDetail {
   limit: number
   // 叠加策略(composite)专属: 子策略列表与合并模式。非 composite 时为 null。
   composite_children?: CompositeChildInfo[] | null
+  /** 选股范围 (override.scope): null=全市场; watchlist=全部自选; watchlist_group+group_ids=所选分组并集(动态绑定) */
+  scope?: { mode: 'watchlist' } | { mode: 'watchlist_group'; group_ids: string[] } | null
 }
 
 export type ScoringDirection = 'high' | 'low'

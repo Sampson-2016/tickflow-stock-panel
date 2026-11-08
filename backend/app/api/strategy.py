@@ -214,6 +214,9 @@ def _strategy_detail(
         "descending": s.meta.get("descending", True),
         "limit": s.meta.get("limit", 30),
         "display_limit": overrides.get("display_limit") if overrides and "display_limit" in overrides else None,
+        # 选股范围 (override.scope): all / watchlist / watchlist_group+group_ids。
+        # 未配置时为 null = 全市场。
+        "scope": (overrides.get("scope") or None) if overrides and isinstance(overrides.get("scope"), dict) else None,
         # 叠加策略: 子策略列表与权重(供前端展示)。override.children 可覆盖 META 固化值。
         "composite_children": (
             [

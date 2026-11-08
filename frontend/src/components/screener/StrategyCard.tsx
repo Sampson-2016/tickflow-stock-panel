@@ -92,12 +92,14 @@ interface StrategyCardProps {
   monitored?: boolean
   /** 切换策略监控 (点击 RadioTower 图标) */
   onToggleMonitor?: () => void
+  /** 选股范围徽标文案 (如「自选」「分组」; 空=全市场不显示) */
+  scopeLabel?: string
 }
 
 export function StrategyCard({
   name, description, source, active, count, expiredCount,
   loading, cardSize,
-  onRun, disabled, onSettings, monitored, onToggleMonitor,
+  onRun, disabled, onSettings, monitored, onToggleMonitor, scopeLabel,
 }: StrategyCardProps) {
   const cs = CARD_STYLES[cardSize]
   const activeCls = active
@@ -111,6 +113,11 @@ export function StrategyCard({
 
   // 失效数 > 0 时显示
   const hasExpired = expiredCount != null && expiredCount > 0
+  // 选股范围徽标 (非全市场时显示)
+  const scopeBadge = scopeLabel ? (
+    <span className="shrink-0 inline-flex items-center px-1 rounded border border-violet-500/30 bg-violet-500/10 text-violet-400 font-medium leading-tight"
+      title={`选股范围: ${scopeLabel}`}>{scopeLabel}</span>
+  ) : null
 
   return (
     <motion.div
@@ -126,6 +133,7 @@ export function StrategyCard({
             <div className="flex items-center gap-1.5 max-w-full">
               <span className={`text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 ${badgeCls}`}>{srcLabel}</span>
               <span className="text-xs font-medium truncate text-foreground">{name}</span>
+              {scopeBadge}
             </div>
             {description && (
               <span className="text-[10px] text-muted leading-tight mt-0.5 line-clamp-1">{description}</span>
@@ -165,6 +173,7 @@ export function StrategyCard({
             <div className="flex items-center gap-1.5 min-w-0">
               <span className={`text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 ${badgeCls}`}>{srcLabel}</span>
               <span className="text-xs font-medium truncate text-foreground">{name}</span>
+              {scopeBadge}
               {count != null && !loading && (
                 <span className={`text-xs font-mono font-bold tabular-nums shrink-0 ${countCls}`}>{count}</span>
               )}
@@ -198,6 +207,7 @@ export function StrategyCard({
             className="flex items-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-wait">
             <span className="text-[8px] px-0.5 rounded bg-secondary/10 text-muted border border-border font-medium leading-tight">{srcLabel}</span>
             <span className="text-[10px] font-medium whitespace-nowrap text-foreground">{name}</span>
+            {scopeBadge}
             {count != null && !loading && (
               <span className={`text-xs font-mono font-bold tabular-nums ${countCls}`}>{count}</span>
             )}

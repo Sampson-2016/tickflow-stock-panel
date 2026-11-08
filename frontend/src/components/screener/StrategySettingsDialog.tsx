@@ -1,7 +1,9 @@
 ﻿import { useState, useEffect, useCallback } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Settings2, RotateCcw, Save, ChevronDown, Filter, Star, TrendingUp, Sparkles, Download, Layers, Plus, Trash2 } from 'lucide-react'
 import { api, type StrategyDetail, type StrategyParamDef, type CompositeChildInfo, type ScoringDirection } from '@/lib/api'
+import { QK } from '@/lib/queryKeys'
 import { BUILTIN_COLUMNS } from '@/lib/watchlist-columns'
 import { color } from '@/lib/colors'
 import { SignalPicker } from './SignalPicker'
@@ -193,6 +195,14 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
   const [exitSignals, setExitSignals] = useState<string[]>([])
   const [displayLimit, setDisplayLimit] = useState<number | null>(null)
   const [basicFilterEnabled, setBasicFilterEnabled] = useState(true)
+  // 选股范围 (override.scope): null=全市场; watchlist=全部自选; watchlist_group=分组并集(动态绑定)
+  const [scopeMode, setScopeMode] = useState<'all' | 'watchlist' | 'watchlist_group'>('all')
+  const [scopeGroupIds, setScopeGroupIds] = useState<string[]>([])
+  const watchGroupsQ = useQuery({
+    queryKey: QK.watchlistGroups,
+    queryFn: api.watchlistGroups,
+    staleTime: 30_000,
+  })
   // 叠加策略: 子策略列表与权重(composite 专属, 编辑权重后随 override 保存)
   const [compositeChildren, setCompositeChildren] = useState<CompositeChildInfo[]>([])
   // 可选子策略列表 + 添加面板开关(composite 设置用)
@@ -230,6 +240,17 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
         setDisplayLimit(d.display_limit ?? null)
         setBasicFilterEnabled(d.basic_filter?.enabled !== false)
         setCompositeChildren(d.composite_children ?? [])
+        // 选股范围回显
+        if (d.scope?.mode === 'watchlist') {
+          setScopeMode('watchlist')
+          setScopeGroupIds([])
+        } else if (d.scope?.mode === 'watchlist_group') {
+          setScopeMode('watchlist_group')
+          setScopeGroupIds(d.scope.group_ids ?? [])
+        } else {
+          setScopeMode('all')
+          setScopeGroupIds([])
+        }
         // composite 策略: 加载全部可选子策略(排除自身和其他 composite)供添加
         if (d.source === 'composite') {
           api.screenerStrategies().then(data => {
@@ -275,6 +296,12 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
         entry_signals: entrySignals,
         exit_signals: exitSignals,
         display_limit: displayLimit,
+        // 选股范围: mode=all 时不写入 (后端缺省即全市场), 避免固化空配置
+        ...(scopeMode === 'all'
+          ? {}
+          : scopeMode === 'watchlist'
+            ? { scope: { mode: 'watchlist' } }
+            : { scope: { mode: 'watchlist_group', group_ids: scopeGroupIds } }),
         // 叠加策略: 子策略权重(composite 专属, 走 override.children 持久化)
         ...(detail?.source === 'composite'
           ? { children: compositeChildren.map(c => ({ strategy_id: c.id, weight: c.weight })) }
@@ -526,8 +553,46 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                     </div>
                   </Section>
 
-                  {/* 列2：策略参数 */}
+                  {/* 列2：选股范围 + 策略参数 */}
                   <div className="space-y-3">
+                    <Section icon={Filter} title="选股范围" accent="text-violet-400">
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap gap-1">
+                          {([
+                            ['all', '全市场'],
+                            ['watchlist', '全部自选'],
+                            ['watchlist_group', '自选分组'],
+                          ] as const).map(([mode, label]) => (
+                            <button key={mode} onClick={() => setScopeMode(mode)}
+                              className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors cursor-pointer ${scopeMode === mode ? 'border-violet-500/40 bg-violet-500/10 text-violet-400' : 'border-border bg-base text-muted hover:border-violet-500/30'}`}>{label}</button>
+                          ))}
+                        </div>
+                        {scopeMode === 'watchlist' && (
+                          <div className="text-[10px] text-muted">对全部自选标的扫描（动态跟随自选增删）。</div>
+                        )}
+                        {scopeMode === 'watchlist_group' && (
+                          <div className="space-y-1">
+                            {watchGroupsQ.isLoading ? (
+                              <div className="text-[10px] text-muted">加载分组中…</div>
+                            ) : (watchGroupsQ.data?.groups ?? []).length === 0 ? (
+                              <div className="text-[10px] text-muted">还没有自选分组，先去自选页创建。</div>
+                            ) : (
+                              <div className="flex flex-wrap gap-0.5">
+                                {(watchGroupsQ.data?.groups ?? []).map(g => {
+                                  const active = scopeGroupIds.includes(g.id)
+                                  return (
+                                    <button key={g.id}
+                                      onClick={() => setScopeGroupIds(prev => active ? prev.filter(x => x !== g.id) : [...prev, g.id])}
+                                      className={`px-1.5 py-0.5 rounded text-[10px] font-medium border transition-colors cursor-pointer ${active ? 'border-violet-500/40 bg-violet-500/10 text-violet-400' : 'border-border bg-base text-muted hover:border-violet-500/30'}`}>{g.name}</button>
+                                  )
+                                })}
+                              </div>
+                            )}
+                            <div className="text-[10px] text-muted/70">可多选，动态绑定分组成员；分组删除后自动降级为全市场。</div>
+                          </div>
+                        )}
+                      </div>
+                    </Section>
                     {detail.params.length > 0 ? (
                       <Section icon={Settings2} title="策略参数" accent="text-muted">
                         <div className="space-y-1.5">

@@ -24,6 +24,40 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/screener", tags=["screener"])
 
 
+def resolve_pool_scope(overrides: dict, asset_type: str) -> Optional[list[str]]:
+    """按策略 override 里的 scope 配置解析选股池。
+
+    scope 结构 (存于 strategy_overrides/{id}.json 的 "scope" 键):
+      - 不存在 / {"mode": "all"}                          → None (全市场)
+      - {"mode": "watchlist"}                             → 全部自选标的
+      - {"mode": "watchlist_group", "group_ids": [...]}   → 所选分组的并集 (动态绑定,
+        每次运行时重新解析, 分组成员增删自动生效; 所选分组被删则降级为全市场)
+
+    ETF 模式下自选为个股清单, 交集为空属正常 — 不做特殊处理。
+    """
+    scope = overrides.get("scope")
+    if not isinstance(scope, dict):
+        return None
+    mode = scope.get("mode")
+    if mode == "watchlist":
+        from app.services import watchlist as watchlist_svc
+        symbols = [str(r["symbol"]) for r in watchlist_svc.list_symbols() if r.get("symbol")]
+        return symbols or None
+    if mode == "watchlist_group":
+        group_ids = scope.get("group_ids")
+        if not isinstance(group_ids, list) or not group_ids:
+            return None
+        from app.services import watchlist as watchlist_svc
+        entries = watchlist_svc.list_symbols()
+        wanted = set(str(g) for g in group_ids)
+        symbols = sorted({
+            str(r["symbol"]) for r in entries
+            if r.get("symbol") and wanted & set(r.get("group_ids") or [])
+        })
+        return symbols or None
+    return None
+
+
 class CustomRequest(BaseModel):
     conditions: list[str]
     order_by: Optional[str] = None
@@ -329,6 +363,8 @@ def run_preset(req: PresetRequest, request: Request):
                 f"strategy {req.strategy_id} 依赖涨停/连板信号,不适用于{req.market.upper()}市场"
             )
         params = dict(overrides.get("params") or {})
+        # 按策略选股范围 (override.scope): 全市场 / 全部自选 / 自选分组并集
+        scope_pool = resolve_pool_scope(overrides, req.asset_type)
         context = svc.build_strategy_context(
             engine,
             as_of,
@@ -340,7 +376,7 @@ def run_preset(req: PresetRequest, request: Request):
         result = engine.run(
             req.strategy_id,
             context,
-            pool=req.pool,
+            pool=(sorted(set(req.pool) & set(scope_pool)) if (req.pool and scope_pool) else (scope_pool or req.pool)),
             params=params,
             overrides=overrides or None,
         )
@@ -614,6 +650,11 @@ def run_all(request: Request, body: Optional[dict] = None):
         for sid in all_ids
     }
     overrides_map = {sid: all_overrides.get(sid, {}) for sid in all_ids}
+    # 按策略解析选股范围 (override.scope): 全市场 / 全部自选 / 自选分组并集
+    pools_map = {
+        sid: resolve_pool_scope(overrides_map.get(sid) or {}, asset_type)
+        for sid in all_ids
+    }
     try:
         context = svc.build_strategy_context(
             engine,
@@ -628,6 +669,7 @@ def run_all(request: Request, body: Optional[dict] = None):
             params_map=params_map,
             overrides_map=overrides_map,
             strategy_ids=all_ids,
+            pools_map=pools_map,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

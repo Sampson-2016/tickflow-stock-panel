@@ -3658,6 +3658,19 @@ def build_matrix_score(
     directions: Mapping[str, str] | None = None,
 ) -> np.ndarray:
     weights = {name: float(weight) for name, weight in scoring.items() if float(weight) != 0.0}
+    # 数据层缺失的特征降级剔除并重分配权重 (如 ETF 无 float_shares → 无 turnover_rate),
+    # 避免整个策略请求因单一特征不可用而失败。
+    available = {}
+    for name, weight in weights.items():
+        if name in {"open", "high", "low", "close", "volume"} or name in market.fields \
+                or _is_supported_matrix_feature(name):
+            available[name] = weight
+        else:
+            logger.warning(
+                "scoring feature %r unavailable for current market data, skipped (weight %s)",
+                name, weight,
+            )
+    weights = available
     total_weight = sum(weights.values())
     if weights and total_weight > 0:
         score = np.zeros(market.shape, dtype=np.float32)
@@ -3753,10 +3766,8 @@ _MATRIX_COMPUTED_FEATURES = frozenset({
 })
 
 
-def matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
-    if name in {"open", "high", "low", "close", "volume"} or name in market.fields:
-        return market.field(name)
-    supported = (
+def _is_supported_matrix_feature(name: str) -> bool:
+    return (
         name in _MATRIX_COMPUTED_FEATURES
         or (name.startswith("ma") and name.endswith("_bias") and name[2:-5].isdigit())
         or (name.startswith("ema") and name.endswith("_bias") and name[3:-5].isdigit())
@@ -3765,6 +3776,12 @@ def matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         or (name.startswith("rsi_") and name[4:].isdigit())
         or (name.startswith("momentum_") and name.endswith("d"))
     )
+
+
+def matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
+    if name in {"open", "high", "low", "close", "volume"} or name in market.fields:
+        return market.field(name)
+    supported = _is_supported_matrix_feature(name)
     if not supported:
         raise ValueError(f"unsupported matrix feature: {name}")
     with _activate_valid_bar_index(market.valid_bars):

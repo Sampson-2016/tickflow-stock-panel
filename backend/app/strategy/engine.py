@@ -928,6 +928,11 @@ class StrategyEngine:
         bf = dict(s.basic_filter) if s.basic_filter else {}
         if overrides and overrides.get("basic_filter"):
             bf.update(overrides["basic_filter"])
+        # A 股板块过滤按股票代码前缀匹配 (60/00/300/...), ETF 代码 (沪 51/56/58,
+        # 深 15/16/18) 一个都匹配不上会全灭; 非股票资产直接剔除 (与回测侧
+        # backtest.strategy._basic_filter_for_asset 同语义)。
+        if context.asset_type != "stock":
+            bf.pop("boards", None)
 
         # Stage 1: 基础过滤（enabled 默认开启; 显式 enabled=false 才跳过）
         if bf and bf.get("enabled", True):
@@ -1021,8 +1026,13 @@ class StrategyEngine:
         overrides_map: dict | None = None,
         *,
         strategy_ids: list[str] | None = None,
+        pools_map: dict[str, list[str] | None] | None = None,
     ) -> dict[str, StrategyResult]:
-        """批量执行策略；当前数据、历史和矩阵均来自同一个调用上下文。"""
+        """批量执行策略；当前数据、历史和矩阵均来自同一个调用上下文。
+
+        pools_map: 按策略的股票池限定 (sid → symbols 或 None=全市场),
+        与单策略 run(pool=...) 同语义; 未提供的策略不限池。
+        """
         if context.current is None:
             raise ValueError("strategy run_all context requires current data")
         df = context.current
@@ -1070,6 +1080,7 @@ class StrategyEngine:
                 field_columns=field_columns,
             )
 
+        pools_map = pools_map or {}
         results: dict[str, StrategyResult] = {}
 
         for sid, _ in selected:
@@ -1081,6 +1092,7 @@ class StrategyEngine:
                     history=shared_history,
                     market=shared_matrix,
                 ),
+                pool=pools_map.get(sid),
                 params=params_map.get(sid),
                 overrides=overrides_map.get(sid),
             )
