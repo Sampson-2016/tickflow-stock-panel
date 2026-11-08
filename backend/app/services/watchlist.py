@@ -384,6 +384,140 @@ def clear_group(group_id: str) -> list[dict]:
         return df.to_dicts()
 
 
+# ── 迁移导出 / 导入 ─────────────────────────────────────────
+_EXPORT_VERSION = 1
+
+
+def export_payload() -> dict:
+    """导出全部分组定义与自选条目 (含颜色/备注/组成员关系), 用于跨环境迁移。"""
+    with _LOCK:
+        groups = _read_groups()
+        rows = _read_entries().to_dicts()
+        return {
+            "version": _EXPORT_VERSION,
+            "exported_at": datetime.utcnow().isoformat(timespec="seconds"),
+            "groups": groups,
+            "symbols": [
+                {
+                    "symbol": row["symbol"],
+                    "added_at": row.get("added_at") or "",
+                    "note": row.get("note") or "",
+                    "group_ids": list(row.get("group_ids") or []),
+                }
+                for row in rows
+            ],
+        }
+
+
+def import_payload(groups_in: list[dict], symbols_in: list[dict]) -> dict:
+    """合并导入导出数据。
+
+    分组按名称匹配: 同名复用本地分组并同步颜色, 新分组按导出顺序追加;
+    自选按 symbol 合并: 新标的插到列表顶部, 已存在标的只并入分组并补空备注。
+    导出里的分组 id 会重映射到本地实际 id, 因此可在不同实例间迁移。
+    """
+    with _LOCK:
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        local_groups = _read_groups()
+        by_name = {group["name"].casefold(): group for group in local_groups}
+        by_id = {group["id"]: group for group in local_groups}
+
+        id_map: dict[str, str] = {}
+        groups_created = 0
+        groups_updated = 0
+        groups_skipped = 0
+
+        for raw in groups_in:
+            if not isinstance(raw, dict):
+                groups_skipped += 1
+                continue
+            name = str(raw.get("name") or "").strip()
+            if not name or len(name) > _MAX_GROUP_NAME_LENGTH:
+                groups_skipped += 1
+                continue
+            exported_id = str(raw.get("id") or "")
+            color = str(raw.get("color") or DEFAULT_GROUP_COLOR).strip().lower()
+            if color not in GROUP_COLORS:
+                color = DEFAULT_GROUP_COLOR
+
+            existing = by_name.get(name.casefold())
+            if existing is not None:
+                if existing["color"] != color:
+                    existing["color"] = color
+                    groups_updated += 1
+                target_id = existing["id"]
+            else:
+                # 优先保留导出端 id (同一实例重复导入保持幂等), 冲突时重新生成
+                target_id = exported_id if exported_id and exported_id not in by_id else uuid.uuid4().hex
+                group = {"id": target_id, "name": name, "color": color}
+                local_groups.append(group)
+                by_id[target_id] = group
+                by_name[name.casefold()] = group
+                groups_created += 1
+            if exported_id:
+                id_map[exported_id] = target_id
+
+        existing_rows = _read_entries().to_dicts()
+        by_symbol = {row["symbol"]: row for row in existing_rows}
+        new_rows: list[dict] = []
+        symbols_added = 0
+        symbols_merged = 0
+        symbols_skipped = 0
+
+        for raw in symbols_in:
+            if not isinstance(raw, dict):
+                symbols_skipped += 1
+                continue
+            symbol = str(raw.get("symbol") or "").strip().upper()
+            if not symbol:
+                symbols_skipped += 1
+                continue
+
+            mapped_gids: list[str] = []
+            for gid in raw.get("group_ids") or []:
+                target = id_map.get(str(gid))
+                if target is not None and target not in mapped_gids:
+                    mapped_gids.append(target)
+            note = str(raw.get("note") or "")
+
+            row = by_symbol.get(symbol)
+            if row is not None:
+                symbols_merged += 1
+                merged_gids = list(row.get("group_ids") or [])
+                for gid in mapped_gids:
+                    if gid not in merged_gids:
+                        merged_gids.append(gid)
+                row["group_ids"] = merged_gids
+                if not (row.get("note") or "") and note:
+                    row["note"] = note
+            else:
+                row = {
+                    "symbol": symbol,
+                    "added_at": str(raw.get("added_at") or "") or now,
+                    "note": note,
+                    "group_ids": mapped_gids,
+                }
+                new_rows.append(row)
+                by_symbol[symbol] = row
+                symbols_added += 1
+
+        if groups_created or groups_updated:
+            _write_groups(local_groups)
+        if symbols_added or symbols_merged:
+            out_rows = new_rows + existing_rows
+            out = pl.DataFrame(out_rows, schema=_ENTRY_SCHEMA) if out_rows else _empty_entries()
+            _write_entries(out)
+
+        return {
+            "groups_created": groups_created,
+            "groups_updated": groups_updated,
+            "groups_skipped": groups_skipped,
+            "symbols_added": symbols_added,
+            "symbols_merged": symbols_merged,
+            "symbols_skipped": symbols_skipped,
+        }
+
+
 def fetch_quotes(symbols: list[str], capset: CapabilitySet, timeout_s: float = 8.0) -> list[dict]:
     """拉取实时行情。
 

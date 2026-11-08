@@ -256,25 +256,120 @@ def test_clear_group_strips_only_that_group(monkeypatch, tmp_path):
     assert b["group_ids"] == []
 
 
-def test_legacy_single_group_id_migration(monkeypatch, tmp_path):
-    """旧 schema(单值 group_id 列)读取迁移 + 首次写回前自动备份 .bak。"""
-    monkeypatch.setattr(settings, "data_dir", tmp_path)
-    path = tmp_path / "user_data" / "watchlist.parquet"
-    path.parent.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["600000.SH", "000001.SZ"],
-        "added_at": ["2026-08-08T10:00:00"] * 2,
-        "note": ["", ""],
-        "group_id": ["g1", None],
-    }).write_parquet(path)
+# ── 迁移导出 / 导入 ─────────────────────────────────────────
+
+
+def test_export_import_roundtrip_to_new_instance(monkeypatch, tmp_path):
+    """线上导出 → 空白实例导入: 分组颜色与多组归属完整迁移。"""
+    online = tmp_path / "online"
+    local = tmp_path / "local"
+    monkeypatch.setattr(settings, "data_dir", online)
+    _, short = watchlist.create_group("短线", "orange")
+    _, core = watchlist.create_group("核心", "teal")
+    watchlist.add("600000.SH", note="银行", group_id=short["id"])
+    watchlist.add_to_group("600000.SH", core["id"])
+    watchlist.add("000001.SZ", note="平安", group_id=core["id"])
+
+    payload = watchlist.export_payload()
+    assert payload["version"] == 1
+    assert len(payload["groups"]) == 2
+    assert len(payload["symbols"]) == 2
+
+    monkeypatch.setattr(settings, "data_dir", local)
+    summary = watchlist.import_payload(payload["groups"], payload["symbols"])
+    assert summary["groups_created"] == 2
+    assert summary["symbols_added"] == 2
+
+    groups = watchlist.list_groups()
+    assert [(g["name"], g["color"]) for g in groups] == [("短线", "orange"), ("核心", "teal")]
+    id_by_name = {g["name"]: g["id"] for g in groups}
 
     rows = watchlist.list_symbols()
-    assert rows[0]["group_ids"] == ["g1"]
-    assert rows[1]["group_ids"] == []
-    assert not (tmp_path / "user_data" / "watchlist.parquet.bak").exists()  # 只读不备份
+    assert [r["symbol"] for r in rows] == ["000001.SZ", "600000.SH"]
+    assert rows[0]["group_ids"] == [id_by_name["核心"]]
+    assert rows[0]["note"] == "平安"
+    assert rows[1]["group_ids"] == [id_by_name["短线"], id_by_name["核心"]]
+    assert rows[1]["note"] == "银行"
 
-    # 触发写入 → 备份生成, 文件落新 schema
+    # 与导出端完全一致的重复导入是幂等的: 不新增分组/标的, 也不重复挂组
+    again = watchlist.import_payload(payload["groups"], payload["symbols"])
+    assert again["groups_created"] == 0
+    assert again["symbols_added"] == 0
+    assert watchlist.list_symbols()[1]["group_ids"] == [id_by_name["短线"], id_by_name["核心"]]
+
+
+def test_import_merges_existing_groups_and_symbols(monkeypatch, tmp_path):
+    """同名分组复用本地 id 并同步颜色; 已存在标的并入分组、保留本地非空备注。"""
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    _, local_group = watchlist.create_group("核心", "sky")
+    watchlist.add("600000.SH", note="本地备注")
     watchlist.add("300750.SZ")
-    assert (tmp_path / "user_data" / "watchlist.parquet.bak").exists()
-    df = pl.read_parquet(path)
-    assert "group_ids" in df.columns and "group_id" not in df.columns
+
+    summary = watchlist.import_payload(
+        [
+            {"id": "online-core", "name": "核心", "color": "teal"},
+            {"id": "online-watch", "name": "观察", "color": "rose"},
+        ],
+        [
+            {"symbol": "600000.SH", "note": "线上备注", "group_ids": ["online-core", "online-watch"]},
+            {"symbol": "000001.SZ", "note": "新导入", "group_ids": ["online-watch"]},
+        ],
+    )
+
+    groups = watchlist.list_groups()
+    assert [g["name"] for g in groups] == ["核心", "观察"]
+    assert groups[0]["id"] == local_group["id"]
+    assert groups[0]["color"] == "teal"
+    new_group_id = groups[1]["id"]
+
+    assert summary == {
+        "groups_created": 1,
+        "groups_updated": 1,
+        "groups_skipped": 0,
+        "symbols_added": 1,
+        "symbols_merged": 1,
+        "symbols_skipped": 0,
+    }
+
+    rows = watchlist.list_symbols()
+    # 新标的插到列表顶部, 既有标的保持原位置
+    assert [r["symbol"] for r in rows] == ["000001.SZ", "300750.SZ", "600000.SH"]
+    added = rows[0]
+    assert added["note"] == "新导入"
+    assert added["group_ids"] == [new_group_id]
+    merged = rows[2]
+    assert merged["note"] == "本地备注"  # 本地非空备注不被覆盖
+    assert merged["group_ids"] == [local_group["id"], new_group_id]
+
+
+def test_import_skips_invalid_entries(monkeypatch, tmp_path):
+    """空名称/超长分组名、空 symbol 跳过并计数, 不影响其余有效数据。"""
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    summary = watchlist.import_payload(
+        [{"name": "  "}, {"name": "x" * 30}, "not-a-dict", {"name": "有效", "color": "black"}],
+        [{"symbol": ""}, "not-a-dict", {"symbol": "600000.SH"}],
+    )
+    assert summary["groups_created"] == 1
+    assert summary["groups_skipped"] == 3
+    assert summary["symbols_added"] == 1
+    assert summary["symbols_skipped"] == 2
+    # 非法颜色回退到默认色
+    assert watchlist.list_groups()[0]["color"] == "sky"
+
+
+def test_export_import_api_contract(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    request = _request()
+    _, group = watchlist.create_group("核心", "teal")
+    watchlist.add("600000.SH", note="银行", group_id=group["id"])
+
+    exported = watchlist_api.export_all()
+    assert exported["version"] == 1
+    assert exported["groups"][0]["color"] == "teal"
+    assert exported["symbols"][0]["group_ids"] == [group["id"]]
+
+    result = watchlist_api.import_all(watchlist_api.ImportRequest(**exported), request)
+    assert result["groups_created"] == 0
+    assert result["symbols_added"] == 0
+    assert len(result["symbols"]) == 1
+    assert result["groups"][0]["name"] == "核心"

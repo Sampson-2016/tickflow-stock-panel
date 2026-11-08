@@ -56,6 +56,25 @@ class GroupAssignRequest(BaseModel):
     group_id: str | None = None
 
 
+class ImportGroupPayload(BaseModel):
+    id: str | None = None
+    name: str = ""
+    color: str | None = None
+
+
+class ImportSymbolPayload(BaseModel):
+    symbol: str = ""
+    note: str = ""
+    added_at: str | None = None
+    group_ids: list[str] = []
+
+
+class ImportRequest(BaseModel):
+    version: int | None = None
+    groups: list[ImportGroupPayload] = []
+    symbols: list[ImportSymbolPayload] = []
+
+
 def _with_names(rows: list[dict], request: Request) -> list[dict]:
     if not rows:
         return rows
@@ -245,6 +264,26 @@ def clear_all():
     """清空自选列表。"""
     count = watchlist.clear()
     return {"removed": count}
+
+
+@router.get("/export")
+def export_all():
+    """导出分组定义与自选条目 (含颜色/备注/组成员关系), 用于跨环境迁移。"""
+    return watchlist.export_payload()
+
+
+@router.post("/import")
+def import_all(req: ImportRequest, request: Request):
+    """合并导入分组与自选; 同名分组复用并同步颜色, 已存在标的只并入分组。"""
+    summary = watchlist.import_payload(
+        [group.model_dump() for group in req.groups],
+        [symbol.model_dump() for symbol in req.symbols],
+    )
+    return {
+        **summary,
+        "groups": watchlist.list_groups(),
+        "symbols": _with_names(watchlist.list_symbols(), request),
+    }
 
 
 # 自选页需要的列

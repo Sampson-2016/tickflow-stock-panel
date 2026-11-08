@@ -279,6 +279,28 @@ export interface WatchlistImportResult {
   unmatched_count: number
 }
 
+/** 自选迁移导出文件 (跨环境迁移: 分组定义 + 颜色 + 个股 + 组成员关系)。 */
+export interface WatchlistExportPayload {
+  version: number
+  exported_at: string
+  groups: WatchlistGroup[]
+  symbols: WatchlistEntry[]
+}
+
+export interface WatchlistTransferSummary {
+  groups_created: number
+  groups_updated: number
+  groups_skipped: number
+  symbols_added: number
+  symbols_merged: number
+  symbols_skipped: number
+}
+
+export interface WatchlistTransferResult extends WatchlistTransferSummary {
+  groups: WatchlistGroup[]
+  symbols: WatchlistEntry[]
+}
+
 export interface Quote {
   symbol: string
   price?: number
@@ -2123,6 +2145,13 @@ export const api = {
     ),
   watchlistClear: () =>
     request<{ removed: number }>('/api/watchlist', { method: 'DELETE' }),
+  watchlistExport: () =>
+    request<WatchlistExportPayload>('/api/watchlist/export'),
+  watchlistImport: (payload: { version?: number; groups: WatchlistGroup[]; symbols: WatchlistEntry[] }) =>
+    request<WatchlistTransferResult>('/api/watchlist/import', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   watchlistQuotes: () => request<{ quotes: Quote[] }>('/api/watchlist/quotes'),
   watchlistEnriched: (extColumns?: string) =>
     request<{ rows: any[]; as_of: string | null; elapsed_ms: number }>(

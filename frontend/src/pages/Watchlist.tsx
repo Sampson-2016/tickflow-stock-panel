@@ -3,14 +3,16 @@ import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Rows3, BarChart3, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, FolderOpen, FolderMinus, FolderPlus } from 'lucide-react'
-import { api, type KlineRow, type MinuteKlineRow, type WatchlistGroup, type WatchlistGroupColor } from '@/lib/api'
+import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Rows3, BarChart3, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, FolderOpen, FolderMinus, FolderPlus, Download, Upload } from 'lucide-react'
+import { api, type KlineRow, type MinuteKlineRow, type WatchlistExportPayload, type WatchlistGroup, type WatchlistGroupColor } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
 import { computeGroupPcts, loadGroupStatsConfig, type GroupStatsConfigPatch } from '@/lib/watchlistGroupStats'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
+import { Modal } from '@/components/Modal'
+import { toast } from '@/components/Toast'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import {
   DimensionMembersDialog,
@@ -669,6 +671,15 @@ export function Watchlist() {
   const [columns, setColumns] = useState<ColumnConfig[]>([...BUILTIN_COLUMNS])
   const [customizerOpen, setCustomizerOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  // 自选迁移: 导出下载 / 导入 JSON 文件 (分组 + 颜色 + 个股 + 组成员关系)
+  const transferInputRef = useRef<HTMLInputElement>(null)
+  const [exporting, setExporting] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [importPayload, setImportPayload] = useState<{
+    version?: number
+    groups: WatchlistExportPayload['groups']
+    symbols: WatchlistExportPayload['symbols']
+  } | null>(null)
   const [searchParams] = useSearchParams()
   const initialGroup = (searchParams.get('group') as WatchlistGroupFilter | null) ?? 'all'
   const [selectedGroup, setSelectedGroup] = useState<WatchlistGroupFilter>(initialGroup)
@@ -1022,6 +1033,74 @@ export function Watchlist() {
     mutationFn: (groupId: string) => api.watchlistGroupClear(groupId),
     onSuccess: data => qc.setQueryData(QK.watchlist, data),
   })
+
+  // 导出自选: 后端返回分组/颜色/个股/组成员关系, 前端落成 JSON 文件
+  const exportWatchlist = async () => {
+    setExporting(true)
+    try {
+      const data = await api.watchlistExport()
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: 'application/json;charset=utf-8',
+      })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `自选股_${new Date().toISOString().slice(0, 10)}.json`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      toast(`已导出 ${data.symbols.length} 只自选 / ${data.groups.length} 个分组`, 'success')
+    } catch {
+      /* request 已弹错误提示 */
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  // 选择导入文件 → 解析校验 → 弹出确认框 (真正写入在 confirmImport)
+  const handleImportFile = async (file: File | null) => {
+    if (!file) return
+    try {
+      const parsed = JSON.parse(await file.text())
+      if (!parsed || !Array.isArray(parsed.groups) || !Array.isArray(parsed.symbols)) {
+        throw new Error('文件格式不正确: 缺少 groups / symbols 数组')
+      }
+      const groups = parsed.groups.filter(
+        (g: any) => g && typeof g === 'object' && typeof g.name === 'string',
+      )
+      const symbols = parsed.symbols.filter(
+        (s: any) => s && typeof s === 'object' && typeof s.symbol === 'string',
+      )
+      if (groups.length === 0 && symbols.length === 0) {
+        throw new Error('文件中没有可导入的自选或分组')
+      }
+      setImportPayload({ version: parsed.version, groups, symbols })
+    } catch (e) {
+      toast(e instanceof Error ? e.message : '读取导入文件失败', 'error')
+    }
+  }
+
+  const confirmImport = async () => {
+    if (!importPayload) return
+    setImporting(true)
+    try {
+      const res = await api.watchlistImport(importPayload)
+      qc.setQueryData(QK.watchlist, { symbols: res.symbols })
+      qc.setQueryData(QK.watchlistGroups, { groups: res.groups })
+      qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
+      qc.invalidateQueries({ queryKey: ['kline-batch'] })
+      setImportPayload(null)
+      toast(
+        `导入完成: 新增 ${res.symbols_added} 只 / 合并 ${res.symbols_merged} 只 / 新增分组 ${res.groups_created} 个`,
+        'success',
+      )
+    } catch {
+      /* request 已弹错误提示; 保留弹窗便于重试 */
+    } finally {
+      setImporting(false)
+    }
+  }
 
   // 多组并存: 勾选加入 / 取消移出 (仅影响该分组, 标的保留在自选中)
   const addGroupMember = useMutation({
@@ -1389,6 +1468,25 @@ export function Watchlist() {
               <ImagePlus className="h-4 w-4" />
             </button>
             <div className="w-px h-5 bg-border" />
+            {/* 迁移: 导出自选 (含分组/颜色) / 导入 JSON */}
+            <button
+              onClick={() => void exportWatchlist()}
+              disabled={exporting}
+              className="inline-flex items-center justify-center h-8 w-8 rounded-btn bg-elevated hover:bg-elevated/80 text-secondary hover:text-foreground transition-colors duration-150 ease-smooth disabled:opacity-40"
+              title="导出自选（含分组和颜色）"
+            >
+              {exporting
+                ? <RefreshCw className="h-4 w-4 animate-spin" />
+                : <Download className="h-4 w-4" />}
+            </button>
+            <button
+              onClick={() => transferInputRef.current?.click()}
+              className="inline-flex items-center justify-center h-8 w-8 rounded-btn bg-elevated hover:bg-elevated/80 text-secondary hover:text-foreground transition-colors duration-150 ease-smooth"
+              title="导入自选 JSON（分组/颜色/个股）"
+            >
+              <Upload className="h-4 w-4" />
+            </button>
+            <div className="w-px h-5 bg-border" />
             {/* 视图 */}
             <button
               onClick={toggleView}
@@ -1466,6 +1564,19 @@ export function Watchlist() {
             />
           </div>
         }
+      />
+
+      {/* 自选迁移: 隐藏文件选择器 (导出/导入按钮触发) */}
+      <input
+        ref={transferInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        onChange={e => {
+          const file = e.target.files?.[0] ?? null
+          e.target.value = ''
+          void handleImportFile(file)
+        }}
       />
 
       {groupStatsOpen && (
@@ -1958,6 +2069,62 @@ export function Watchlist() {
           setPreviewName(name ?? '')
         }}
       />
+
+      {/* 导入确认: 展示待合并的分组/个股数量, 确认后才写入 */}
+      {importPayload && (
+        <Modal
+          onClose={() => {
+            if (!importing) setImportPayload(null)
+          }}
+          labelledBy="watchlist-transfer-import-title"
+          panelClassName="w-[90vw] max-w-[420px] bg-surface border border-border rounded-card shadow-xl"
+        >
+          <div className="px-5 py-4">
+            <h2
+              id="watchlist-transfer-import-title"
+              className="text-sm font-semibold text-foreground"
+            >
+              导入自选
+            </h2>
+            <p className="mt-1 text-xs text-secondary">
+              将从文件合并导入以下内容，不会清空本地现有自选。
+            </p>
+            <div className="mt-3 space-y-1.5 rounded-btn border border-border bg-elevated/40 px-3 py-2.5 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-secondary">分组</span>
+                <span className="text-foreground tabular-nums">
+                  {importPayload.groups.length} 个（含颜色）
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-secondary">自选个股</span>
+                <span className="text-foreground tabular-nums">
+                  {importPayload.symbols.length} 只
+                </span>
+              </div>
+            </div>
+            <p className="mt-3 text-[11px] text-muted leading-relaxed">
+              同名分组会复用本地分组并同步颜色；已存在的个股不会重复添加，只并入分组并补全空备注。
+            </p>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                onClick={() => setImportPayload(null)}
+                disabled={importing}
+                className="px-3 py-1.5 rounded-btn bg-elevated text-secondary hover:bg-elevated/80 text-sm transition-colors disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => void confirmImport()}
+                disabled={importing}
+                className="px-3 py-1.5 rounded-btn bg-accent text-white hover:bg-accent/90 text-sm font-medium transition-colors disabled:opacity-50"
+              >
+                {importing ? '导入中...' : '确认导入'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
 
       <WatchlistImportDialog
         open={importOpen}
