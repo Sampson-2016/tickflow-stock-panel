@@ -1,4 +1,5 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence } from 'framer-motion'
 import {
@@ -251,6 +252,8 @@ export function ConceptAnalysis() {
   const [showConfig, setShowConfig] = useState(false)
   const [search, setSearch] = useState('')
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const focusName = searchParams.get('focus')
   const [sortMode, setSortMode] = useState<SortMode>('heat')
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
   const [previewName, setPreviewName] = useState<string>('')
@@ -309,6 +312,20 @@ export function ConceptAnalysis() {
     const base = q ? stats.filter(s => s.key.toLowerCase().includes(q)) : stats
     return [...base].sort(statSort(sortMode))
   }, [stats, search, sortMode])
+
+  // 首页热度卡片跳转锚定: ?focus=<板块名> — 命中列表则直接选中, 未命中则回退填入搜索框
+  useEffect(() => {
+    if (!focusName || stats.length === 0) return
+    const hit = stats.find(s => s.key === focusName)
+    if (hit) {
+      setSelectedKey(hit.key)
+    } else if (!search) {
+      setSearch(focusName)
+      setSelectedKey(null)
+    }
+    setSearchParams({}, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusName, stats.length])
 
   const selected = filteredStats.find(s => s.key === selectedKey) ?? filteredStats[0] ?? null
   const leading = useMemo(() => [...stats].sort(statSort('heat')).slice(0, 10), [stats])

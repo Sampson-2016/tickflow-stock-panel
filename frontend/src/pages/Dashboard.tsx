@@ -466,9 +466,10 @@ function StockList({ title, rows, mode, onStockClick }: {
   )
 }
 
-function RankColumn({ title, rows, tone, onStockClick }: {
+function RankColumn({ title, rows, tone, onStockClick, onBoardClick }: {
   title: string; rows: OverviewDimensionRankItem[]; tone: 'bull' | 'bear';
   onStockClick?: (symbol: string, name?: string) => void;
+  onBoardClick?: (name: string) => void;
 }) {
   return (
     <div className="min-w-0 space-y-1">
@@ -477,7 +478,11 @@ function RankColumn({ title, rows, tone, onStockClick }: {
         <div key={`${title}-${r.name}-${idx}`} className="grid grid-cols-[14px_1fr_auto] items-center gap-1 rounded-md bg-elevated/40 px-1.5 py-1 border border-transparent hover:border-border/60 transition-colors">
           <span className="text-center font-mono text-[9px] text-muted">{idx + 1}</span>
           <div className="min-w-0">
-            <div className="truncate text-[11px] text-foreground" title={r.name}>{r.name}</div>
+            <button
+              onClick={() => onBoardClick?.(r.name)}
+              className="block max-w-full truncate text-[11px] text-foreground hover:text-accent cursor-pointer transition-colors"
+              title={`查看「${r.name}」分析`}
+            >{r.name}</button>
             <div className="mt-0.5 flex items-center gap-1">
               <span className="shrink-0 font-mono text-[9px] text-muted">{r.count}只</span>
               <span className="text-muted">·</span>
@@ -508,9 +513,10 @@ function RankColumn({ title, rows, tone, onStockClick }: {
   )
 }
 
-function HotRankCard({ title, rank, configUrl, onStockClick }: {
+function HotRankCard({ title, rank, configUrl, onStockClick, onBoardClick }: {
   title: string; rank?: OverviewMarket['concept_rank']; configUrl: string;
   onStockClick?: (symbol: string, name?: string) => void;
+  onBoardClick?: (name: string) => void;
 }) {
   const hasData = (rank?.leading?.length ?? 0) > 0 || (rank?.lagging?.length ?? 0) > 0
   return (
@@ -518,8 +524,8 @@ function HotRankCard({ title, rank, configUrl, onStockClick }: {
       <SectionTitle icon={Flame} title={title} hint="领涨/领跌" />
       {hasData ? (
         <div className="grid grid-cols-2 gap-2">
-          <RankColumn title="领涨" rows={rank?.leading ?? []} tone="bull" onStockClick={onStockClick} />
-          <RankColumn title="领跌" rows={rank?.lagging ?? []} tone="bear" onStockClick={onStockClick} />
+          <RankColumn title="领涨" rows={rank?.leading ?? []} tone="bull" onStockClick={onStockClick} onBoardClick={onBoardClick} />
+          <RankColumn title="领跌" rows={rank?.lagging ?? []} tone="bear" onStockClick={onStockClick} onBoardClick={onBoardClick} />
         </div>
       ) : (
         <div className="py-4 text-center">
@@ -822,8 +828,8 @@ export function Dashboard() {
           </div>
 
           <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
-            <HotRankCard title="概念热度" rank={data.concept_rank} configUrl="/concept-analysis" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />
-            <HotRankCard title="行业热度" rank={data.industry_rank} configUrl="/industry-analysis" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />
+            <HotRankCard title="概念热度" rank={data.concept_rank} configUrl="/concept-analysis" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} onBoardClick={name => window.open(`/concept-analysis?focus=${encodeURIComponent(name)}`, '_blank')} />
+            <HotRankCard title="行业热度" rank={data.industry_rank} configUrl="/industry-analysis" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} onBoardClick={name => window.open(`/industry-analysis?focus=${encodeURIComponent(name)}`, '_blank')} />
           </div>
 
           <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 xl:grid-cols-4">
