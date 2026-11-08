@@ -270,10 +270,14 @@ def _cache_payload_with_ext(cached: dict, ext_values: dict[str, dict[str, Any]])
 
 
 def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: dict,
-                           market: str = "cn") -> None:
-    """单跑后更新缓存中该策略的结果，保持缓存与最新计算一致。"""
+                           market: str = "cn", asset_type: str = "stock") -> None:
+    """单跑后更新缓存中该策略的结果，保持缓存与最新计算一致。
+
+    缓存按 market + asset_type 隔离: ETF 单跑结果写 ETF 缓存文件,
+    否则会覆盖股票缓存, 导致股票页混出 ETF 行 (反之亦然)。
+    """
     from app.services import strategy_cache
-    cached = strategy_cache.read_cache(data_dir, market)
+    cached = strategy_cache.read_cache(data_dir, market, asset_type)
     if cached and cached.get("as_of") == as_of:
         results = cached.get("results", {})
         results[strategy_id] = {
@@ -281,7 +285,7 @@ def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: di
             "as_of": as_of,
             "rows": safe_data.get("rows", []),
         }
-        strategy_cache.write_cache(data_dir, as_of, results, market)
+        strategy_cache.write_cache(data_dir, as_of, results, market, asset_type)
 
 
 @router.get("/strategies")
@@ -385,7 +389,7 @@ def run_preset(req: PresetRequest, request: Request):
         raise HTTPException(status_code=status_code, detail=str(e)) from e
 
     safe_data = _safe(asdict(result))
-    _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data, req.market)
+    _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data, req.market, req.asset_type)
 
     return _result_with_ext(safe_data, ext_values)
 
@@ -396,7 +400,8 @@ def _cached_with_realtime(request: Request, market: str = "cn") -> dict:
     实时结果仅由 A 股监控引擎产出, 港美股只返回盘后缓存(不叠加实时)。
     """
     data_dir = request.app.state.repo.store.data_dir
-    cached = strategy_cache.read_cache(data_dir, market)
+    # cached 端点仅供股票策略页秒加载 (前端 ETF 页走实时单跑), 固定读股票缓存
+    cached = strategy_cache.read_cache(data_dir, market, "stock")
     if cached is None:
         cached = {"as_of": None, "results": {}, "updated_at": None}
 
@@ -686,10 +691,10 @@ def run_all(request: Request, body: Optional[dict] = None):
     elapsed = (time.perf_counter() - t_total) * 1000
     logger.info("run_all: total took %.1fms (%d strategies)", elapsed, len(all_ids))
 
-    # 写入策略缓存 (供页面秒加载)
+    # 写入策略缓存 (供页面秒加载); 按资产类型隔离, 避免股票/ETF 结果互相覆盖
     if results:
         try:
-            strategy_cache.write_cache(data_dir, str(as_of), results, market)
+            strategy_cache.write_cache(data_dir, str(as_of), results, market, asset_type)
         except Exception:  # noqa: BLE001
             pass
 

@@ -84,6 +84,14 @@ export function renderBuiltinDataCell(r: any, col: ColumnConfig): ReactNode | nu
       return <td key={col.id} className={numCls}>{r.annual_vol_20d != null ? fmtPct(r.annual_vol_20d) : '—'}</td>
     // 均线
     case 'ma5':  return <td key={col.id} className={numCls}>{fmtMaybePrice(r.ma5)}</td>
+    // 均线乖离率 (派生: close/maN - 1, 结果行无现成字段, 由 close+maN 现算)
+    case 'ma5_bias':
+    case 'ma20_bias': {
+      const period = key === 'ma5_bias' ? 'ma5' : 'ma20'
+      const ma = r[period]
+      const bias = (r.close != null && ma != null && ma !== 0) ? (r.close / ma - 1) : null
+      return <td key={col.id} className={`${numCls} font-medium ${priceColorClass(bias)}`}>{bias != null ? `${(bias * 100).toFixed(2)}%` : '—'}</td>
+    }
     case 'ma10': return <td key={col.id} className={numCls}>{fmtMaybePrice(r.ma10)}</td>
     case 'ma20': return <td key={col.id} className={numCls}>{fmtMaybePrice(r.ma20)}</td>
     case 'ma60': return <td key={col.id} className={numCls}>{fmtMaybePrice(r.ma60)}</td>

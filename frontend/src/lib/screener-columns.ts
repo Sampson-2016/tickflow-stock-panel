@@ -38,8 +38,10 @@ export const SCREENER_BUILTIN_COLUMNS: ColumnConfig[] = [
   { id: 'builtin:annual_vol', source: { type: 'builtin', key: 'annual_vol' }, label: '年化波动', visible: false, align: 'right' },
   // 均线
   { id: 'builtin:ma5', source: { type: 'builtin', key: 'ma5' }, label: 'MA5', visible: false, align: 'right' },
+  { id: 'builtin:ma5_bias', source: { type: 'builtin', key: 'ma5_bias' }, label: 'MA5乖离率', visible: false, align: 'right' },
   { id: 'builtin:ma10', source: { type: 'builtin', key: 'ma10' }, label: 'MA10', visible: false, align: 'right' },
   { id: 'builtin:ma20', source: { type: 'builtin', key: 'ma20' }, label: 'MA20', visible: false, align: 'right' },
+  { id: 'builtin:ma20_bias', source: { type: 'builtin', key: 'ma20_bias' }, label: 'MA20乖离率', visible: false, align: 'right' },
   { id: 'builtin:ma60', source: { type: 'builtin', key: 'ma60' }, label: 'MA60', visible: false, align: 'right' },
   // 区间
   { id: 'builtin:high_60d', source: { type: 'builtin', key: 'high_60d' }, label: '60日高', visible: false, align: 'right' },
@@ -93,7 +95,7 @@ export const SCREENER_COLUMN_GROUPS: ColumnGroup[] = [
   { id: 'core', label: '核心', icon: '🎯', keys: ['strategies', 'score', 'signals'] },
   { id: 'price', label: '价格', icon: '💰', keys: ['price', 'pct', 'change_amount', 'amplitude'] },
   { id: 'volume', label: '成交', icon: '📊', keys: ['turnover', 'amount', 'float_val', 'vol_ratio', 'annual_vol'] },
-  { id: 'ma', label: '均线', icon: '📈', keys: ['ma5', 'ma10', 'ma20', 'ma60'] },
+  { id: 'ma', label: '均线', icon: '📈', keys: ['ma5', 'ma5_bias', 'ma10', 'ma20', 'ma20_bias', 'ma60'] },
   { id: 'range', label: '区间', icon: '📏', keys: ['high_60d', 'low_60d'] },
   { id: 'tech', label: '技术指标', icon: '🔬', keys: ['rsi6', 'rsi14', 'rsi24', 'macd_dif', 'macd_dea', 'macd_hist', 'kdj_k', 'kdj_d', 'kdj_j', 'boll_upper', 'boll_lower', 'atr14', 'vol_ma5', 'vol_ma10'] },
   { id: 'momentum', label: '动量', icon: '🚀', keys: ['momentum_5d', 'momentum_10d', 'momentum_20d', 'momentum_30d', 'momentum_60d'] },

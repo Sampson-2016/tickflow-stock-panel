@@ -40,42 +40,52 @@ _CACHE_FILENAME = "strategy_cache.json"
 # 无锁会丢更新/读到半写文件。read_cache 与 write_cache 共用此锁; write 内部复用
 # _read_cache_unlocked 避免自死锁。写入用临时文件 + os.replace 做到原子替换。
 #
-# 注: 该锁按模块全局共享, 不按市场细分。不同市场写不同文件, 理论上可并行, 但
-# 策略缓存写入是低频操作 (盘后批量/单策略重跑), 细分锁带来的收益不足以抵偿
-# 死锁风险, 故保持单锁。
+# 注: 该锁按模块全局共享, 不按市场/资产类型细分。不同市场/资产类型写不同文件,
+# 理论上可并行, 但策略缓存写入是低频操作 (盘后批量/单策略重跑), 细分锁带来的
+# 收益不足以抵偿死锁风险, 故保持单锁。
 _file_lock = threading.Lock()
 
+# 缓存按资产类型隔离的变体后缀; stock 沿用原文件名 (向后兼容既有用户缓存)
+_ASSET_TYPES = ("stock", "etf")
 
-def _cache_path(data_dir: Path, market: str = "cn") -> Path:
-    """策略缓存文件路径, 按市场隔离。
 
-    A 股沿用原文件名 strategy_cache.json —— 既向后兼容已存在的用户缓存,
-    也避免升级后 A 股策略页首屏突然读不到数据。港美股各自独立成文件。
+def _cache_path(data_dir: Path, market: str = "cn", asset_type: str = "stock") -> Path:
+    """策略缓存文件路径, 按市场 + 资产类型隔离。
+
+    A 股股票沿用原文件名 strategy_cache.json —— 既向后兼容已存在的用户缓存,
+    也避免升级后 A 股策略页首屏突然读不到数据。港美股/ETF 各自独立成文件。
 
     此前所有市场共用一个文件: 港股跑完 run_all 会覆盖 A 股结果, 切回 A 股
-    看到的是港股命中数, 属实际的数据正确性问题。
+    看到的是港股命中数, 属实际的数据正确性问题。资产类型同理: ETF 单跑/批量
+    结果写进股票缓存文件后, 股票页会混出 ETF 行 (反之亦然)。
     """
     if market and market != "cn":
-        return data_dir / "user_data" / f"strategy_cache_{market}.json"
-    return data_dir / "user_data" / _CACHE_FILENAME
+        stem = f"strategy_cache_{market}"
+    else:
+        stem = "strategy_cache"
+    if asset_type and asset_type != "stock":
+        stem += f"_{asset_type}"
+    return data_dir / "user_data" / f"{stem}.json"
 
 
-def _enriched_parquet_path(data_dir: Path, as_of: str, market: str = "cn") -> Path:
+def _enriched_parquet_path(data_dir: Path, as_of: str, market: str = "cn",
+                           asset_type: str = "stock") -> Path:
     """返回 enriched parquet 文件路径。"""
     from app.tickflow.repository import enriched_dirname
-    return data_dir / enriched_dirname("stock", market) / f"date={as_of}" / "part.parquet"
+    return data_dir / enriched_dirname(asset_type, market) / f"date={as_of}" / "part.parquet"
 
 
-def _get_enriched_mtime(data_dir: Path, as_of: str, market: str = "cn") -> float | None:
+def _get_enriched_mtime(data_dir: Path, as_of: str, market: str = "cn",
+                        asset_type: str = "stock") -> float | None:
     """返回 enriched parquet 文件的 mtime (秒)。文件不存在返回 None。"""
-    p = _enriched_parquet_path(data_dir, as_of, market)
+    p = _enriched_parquet_path(data_dir, as_of, market, asset_type)
     try:
         return p.stat().st_mtime
     except FileNotFoundError:
         return None
 
 
-def read_cache(data_dir: Path, market: str = "cn") -> dict | None:
+def read_cache(data_dir: Path, market: str = "cn", asset_type: str = "stock") -> dict | None:
     """读取策略缓存文件。返回 None 表示无缓存或读取失败。
 
     说明: 原先有 enriched mtime 过期校验 (数据文件变化 → 判过期返回 None),
@@ -85,28 +95,31 @@ def read_cache(data_dir: Path, market: str = "cn") -> dict | None:
     端点叠加监控引擎的内存实时结果 (latest_strategy_results) 来保证。
     """
     with _file_lock:
-        return _read_cache_unlocked(data_dir, market)
+        return _read_cache_unlocked(data_dir, market, asset_type)
 
 
-def clear_cache(data_dir: Path, market: str | None = None) -> None:
+def clear_cache(data_dir: Path, market: str | None = None,
+                asset_type: str | None = None) -> None:
     """删除策略结果缓存；策略代码 reload 后避免继续展示旧公式结果。
 
-    market=None 时清空全部市场: 策略代码/公式变了, 所有市场的既有结果都失效,
-    只清 A 股会让港美股继续展示旧公式算出的结果。
+    market=None 时清空全部市场; asset_type=None 时清空全部资产类型:
+    策略代码/公式变了, 所有市场与资产类型变体的既有结果都失效。
     """
     from app.markets import ALL_MARKETS
-    targets = ALL_MARKETS if market is None else [market]
+    markets = ALL_MARKETS if market is None else [market]
+    asset_types = _ASSET_TYPES if asset_type is None else [asset_type]
     with _file_lock:
-        for m in targets:
-            path = _cache_path(data_dir, m)
-            path.unlink(missing_ok=True)
-            path.with_name(path.name + ".tmp").unlink(missing_ok=True)
+        for m in markets:
+            for at in asset_types:
+                path = _cache_path(data_dir, m, at)
+                path.unlink(missing_ok=True)
+                path.with_name(path.name + ".tmp").unlink(missing_ok=True)
 
 
-
-def _read_cache_unlocked(data_dir: Path, market: str = "cn") -> dict | None:
+def _read_cache_unlocked(data_dir: Path, market: str = "cn",
+                         asset_type: str = "stock") -> dict | None:
     """实际读取逻辑 (不持锁)。供 read_cache 与 write_cache 复用, 避免重入死锁。"""
-    path = _cache_path(data_dir, market)
+    path = _cache_path(data_dir, market, asset_type)
     if not path.exists():
         return None
     try:
@@ -136,19 +149,20 @@ def write_cache(
     as_of: str,
     results: dict[str, Any],
     market: str = "cn",
+    asset_type: str = "stock",
 ) -> None:
     """将策略结果写入缓存文件，同时更新今日曾命中集合。
 
     - 日期变更时重置 today_ever_matched 和 today_ever_rows
     - 同一天内合并 (并集) 之前曾命中的 symbol，并用最新行数据更新
-    - 按 market 写入独立文件，不同市场互不覆盖
+    - 按 market + asset_type 写入独立文件，不同市场/资产类型互不覆盖
     """
-    path = _cache_path(data_dir, market)
+    path = _cache_path(data_dir, market, asset_type)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # 整个 read-modify-write 持锁: 避免并发 write 丢更新, 也避免与 read_cache 撕裂
     with _file_lock:
-        _write_cache_locked(path, data_dir, as_of, results, market)
+        _write_cache_locked(path, data_dir, as_of, results, market, asset_type)
 
 
 def _write_cache_locked(
@@ -157,10 +171,11 @@ def _write_cache_locked(
     as_of: str,
     results: dict[str, Any],
     market: str = "cn",
+    asset_type: str = "stock",
 ) -> None:
     """持 _file_lock 后的实际写入逻辑 (read-merge-write + 原子替换)。"""
     # 读取旧缓存 (已持锁, 走不重入的 _read_cache_unlocked)
-    old = _read_cache_unlocked(data_dir, market)
+    old = _read_cache_unlocked(data_dir, market, asset_type)
     old_as_of = old.get("as_of") if old else None
     old_ever_rows: dict[str, dict[str, dict]] = old.get("today_ever_rows", {}) if old else {}
 
@@ -195,7 +210,7 @@ def _write_cache_locked(
 
     # enriched_mtime: 盘后缓存写入时记录 (向后兼容旧字段)。read_cache 已不再用它
     # 做过期校验, 实时新鲜度改由 /cached 端点叠加监控引擎内存结果保证。
-    enriched_mtime = _get_enriched_mtime(data_dir, as_of, market)
+    enriched_mtime = _get_enriched_mtime(data_dir, as_of, market, asset_type)
 
     payload = {
         "as_of": as_of,

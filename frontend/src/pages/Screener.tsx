@@ -347,14 +347,18 @@ export function Screener() {
   }, [effectiveResults])
 
   // 计算当前策略的失效行: 今日曾命中但当前已不命中。
+  // 仅股票页计算: singleCachedQuery 只对股票启用, 但禁用后 data 仍保留 —
+  // 若不在 ETF 页短路, 切到 ETF 后会把股票页的 today_ever_rows 当失效行
+  // 灰色追加在 ETF 结果末尾 (旧股票"残留"的根因)。
   const expiredRows = useMemo(() => {
+    if (assetType !== 'stock') return []
     const everRows = singleCachedQuery.data?.today_ever_rows
     if (!everRows || !result || result.as_of !== asOf) return []
     const currentSymbols = new Set(result.rows.map((row: any) => row.symbol))
     return Object.entries(everRows)
       .filter(([symbol]) => !currentSymbols.has(symbol))
       .map(([, row]) => ({ ...row, _expired: true }))
-  }, [singleCachedQuery.data, result, asOf])
+  }, [singleCachedQuery.data, result, asOf, assetType])
 
   // 表头排序（受控）：用户点击列则按该列；未点时下方按评分默认降序
   const { sort, toggle, sortRows } = useTableSort()
@@ -553,32 +557,34 @@ export function Screener() {
     },
   })
 
-  // 策略监控: 查询规则, 建立 strategyId → ruleId 映射 (只看 type=strategy 且 enabled)
+  // 策略监控: 查询规则, 建立 strategyId|assetType → ruleId 映射 (只看 type=strategy 且 enabled)
+  // 股票/ETF 各有独立监控规则; 旧规则无 asset_type 字段, 默认视为 stock
   const monitorRules = useQuery({ queryKey: QK.monitorRules, queryFn: api.monitorRulesList })
   const strategyMonitorMap = useMemo(() => {
     const m = new Map<string, string>()
     for (const r of monitorRules.data?.rules ?? []) {
       if (r.type === 'strategy' && r.enabled && r.strategy_id) {
-        m.set(r.strategy_id, r.id)
+        m.set(`${r.strategy_id}|${r.asset_type ?? 'stock'}`, r.id)
       }
     }
     return m
   }, [monitorRules.data])
 
   const toggleStrategyMonitor = (strategyId: string, strategyName: string) => {
-    const existingRuleId = strategyMonitorMap.get(strategyId)
+    const existingRuleId = strategyMonitorMap.get(`${strategyId}|${assetType}`)
     if (existingRuleId) {
       // 已监控 → 删除规则
       api.monitorRuleDelete(existingRuleId).then(() =>
         qc.invalidateQueries({ queryKey: QK.monitorRules }),
       )
     } else {
-      // 未监控 → 直接创建 type=strategy 规则
+      // 未监控 → 直接创建 type=strategy 规则; asset_type 跟随当前页面 (股票/ETF 分开监控)
       api.monitorRuleSave({
         id: genRuleId(),
         name: `策略监控 · ${strategyName}`,
         enabled: true,
         type: 'strategy',
+        asset_type: assetType,
         scope: 'all',
         symbols: [],
         sector: null,
@@ -760,7 +766,7 @@ export function Screener() {
                   onRun={() => handleRun(s)}
                   disabled={run.isPending && activeStrategy === s.id}
                   onSettings={() => setSettingsStrategyId(s.id)}
-                  monitored={strategyMonitorMap.has(s.id)}
+                  monitored={strategyMonitorMap.has(`${s.id}|${assetType}`)}
                   onToggleMonitor={() => toggleStrategyMonitor(s.id, s.name)}
                   scopeLabel={s.scope?.mode === 'watchlist' ? '自选' : s.scope?.mode === 'watchlist_group' ? '分组' : undefined}
                 />
