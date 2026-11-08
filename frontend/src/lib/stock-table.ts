@@ -72,8 +72,10 @@ export function getSortValue(r: any, col: ColumnConfig): any {
     case 'vol_ratio':     return r.vol_ratio_5d
     case 'annual_vol':    return r.annual_vol_20d
     case 'ma5':           return r.ma5
+    case 'ma5_bias':      return r.close != null && r.ma5 ? r.close / r.ma5 - 1 : null
     case 'ma10':          return r.ma10
     case 'ma20':          return r.ma20
+    case 'ma20_bias':     return r.close != null && r.ma20 ? r.close / r.ma20 - 1 : null
     case 'ma60':          return r.ma60
     case 'high_60d':      return r.high_60d
     case 'low_60d':       return r.low_60d
