@@ -254,6 +254,7 @@ class RunAllRequest(BaseModel):
 class SaveConfigRequest(BaseModel):
     strategy_id: str
     overrides: dict
+    asset_type: str = "stock"
 
 
 class AIGenerateRequest(BaseModel):
@@ -313,7 +314,7 @@ def list_strategies(
 ):
     engine = _get_engine(request)
     data_dir = _data_dir(request)
-    all_overrides = strategy_config.list_overrides(data_dir)
+    all_overrides = strategy_config.list_overrides(data_dir, asset_type)
 
     result = []
     for meta in engine.list_strategies():
@@ -331,10 +332,10 @@ def list_strategies(
 
 
 @router.get("/{strategy_id}")
-def get_strategy(strategy_id: str, request: Request):
+def get_strategy(strategy_id: str, request: Request, asset_type: str = "stock"):
     engine = _get_engine(request)
     s = _get_public_strategy(engine, strategy_id)
-    overrides = strategy_config.load_override(_data_dir(request), strategy_id)
+    overrides = strategy_config.load_override(_data_dir(request), strategy_id, asset_type)
     return _strategy_detail(s, overrides or None, engine)
 
 
@@ -348,7 +349,7 @@ def run_strategy(req: RunRequest, request: Request):
     data_dir = _data_dir(request)
 
     # 读取用户覆盖配置
-    overrides = strategy_config.load_override(data_dir, req.strategy_id)
+    overrides = strategy_config.load_override(data_dir, req.strategy_id, req.asset_type)
     params = req.params or {}
     # 合并用户保存的策略参数
     if overrides.get("params"):
@@ -402,7 +403,7 @@ def run_all(req: RunAllRequest, request: Request):
     if not as_of:
         return {"as_of": None, "results": {}}
 
-    all_overrides = strategy_config.list_overrides(data_dir)
+    all_overrides = strategy_config.list_overrides(data_dir, req.asset_type)
     strategy_ids = [
         meta["id"]
         for meta in engine.list_strategies()
@@ -448,7 +449,7 @@ def save_config(req: SaveConfigRequest, request: Request):
     # 剥离与策略默认值相同的字段，只保存用户真正修改过的值
     overrides = _strip_defaults(req.strategy_id, req.overrides, engine)
 
-    strategy_config.save_override(_data_dir(request), req.strategy_id, overrides)
+    strategy_config.save_override(_data_dir(request), req.strategy_id, overrides, req.asset_type)
     return {"ok": True}
 
 
@@ -457,13 +458,14 @@ def patch_config(req: SaveConfigRequest, request: Request):
     engine = _get_engine(request)
     _get_public_strategy(engine, req.strategy_id)
     data_dir = _data_dir(request)
-    overrides = strategy_config.load_override(data_dir, req.strategy_id)
+    overrides = strategy_config.load_override(data_dir, req.strategy_id, req.asset_type)
     overrides.update(req.overrides)
     _validate_scoring_config(overrides)
     strategy_config.save_override(
         data_dir,
         req.strategy_id,
         _strip_defaults(req.strategy_id, overrides, engine),
+        req.asset_type,
     )
     return {"ok": True}
 
@@ -518,9 +520,9 @@ def _strip_defaults(strategy_id: str, overrides: dict, engine) -> dict:
 
 
 @router.delete("/config/{strategy_id}")
-def reset_config(strategy_id: str, request: Request):
+def reset_config(strategy_id: str, request: Request, asset_type: str = "stock"):
     _get_public_strategy(_get_engine(request), strategy_id)
-    strategy_config.delete_override(_data_dir(request), strategy_id)
+    strategy_config.delete_override(_data_dir(request), strategy_id, asset_type)
     return {"ok": True}
 
 
@@ -818,8 +820,9 @@ def export_strategy(strategy_id: str, request: Request):
     if not path or not path.exists():
         raise HTTPException(status_code=404, detail="策略源文件不存在")
 
-    overrides = strategy_config.load_override(data_dir, strategy_id)
-    detail = _strategy_detail(s, overrides or None, engine)
+    bundle = strategy_config.load_config_bundle(data_dir, strategy_id)
+    stock_overrides = strategy_config.load_override(data_dir, strategy_id, "stock")
+    detail = _strategy_detail(s, stock_overrides or None, engine)
     return {
         "version": 1,
         "exported_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -828,8 +831,9 @@ def export_strategy(strategy_id: str, request: Request):
         "name": detail["name"],
         "description": detail["description"],
         "code": path.read_text(encoding="utf-8"),
-        # 用户修改过的配置; 代码内 META 已含默认值, 两者合起来即完整策略
-        "config": overrides,
+        # 兼容旧版导入: config 为股票配置; asset_configs 含 stock/etf 全部独立配置
+        "config": stock_overrides,
+        "asset_configs": bundle["asset"],
     }
 
 

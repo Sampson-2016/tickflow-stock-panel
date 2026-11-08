@@ -229,7 +229,7 @@ class StrategyEngine:
         self,
         strategy_dirs: list[Path] | None = None,
         *,
-        override_loader: Callable[[str], dict] | None = None,
+        override_loader: Callable[[str, str | None], dict] | None = None,
     ):
         self._strategies: dict[str, StrategyDef] = {}
         self._load_errors: list[dict] = []  # 加载失败的策略 [{file, error}]
@@ -1312,7 +1312,7 @@ class StrategyEngine:
             child_override: dict = {}
             if self._override_loader is not None:
                 try:
-                    loaded = self._override_loader(cid)
+                    loaded = self._override_loader(cid, context.asset_type)
                     if isinstance(loaded, dict):
                         child_override = dict(loaded)
                 except Exception:  # noqa: BLE001

@@ -307,7 +307,7 @@ def strategies(
         if not _market_compatible_strategy(meta, market):
             continue
         sid = meta["id"]
-        overrides = strategy_config.load_override(data_dir, sid)
+        overrides = strategy_config.load_override(data_dir, sid, asset_type)
         presets.append({
             **meta,
             "name": overrides.get("name") or meta["name"],
@@ -346,7 +346,7 @@ def run_preset(req: PresetRequest, request: Request):
         raise HTTPException(status_code=400, detail="无可用数据日期")    # 加载用户保存的策略配置
     data_dir = request.app.state.repo.store.data_dir
     ext_values = _load_ext_value_maps(repo, req.ext_columns)
-    overrides = strategy_config.load_override(data_dir, req.strategy_id)
+    overrides = strategy_config.load_override(data_dir, req.strategy_id, req.asset_type)
     engine = getattr(request.app.state, "strategy_engine", None)
     if not engine:
         raise HTTPException(status_code=404, detail=f"策略引擎未初始化或策略 {req.strategy_id} 不存在")
@@ -642,7 +642,7 @@ def run_all(request: Request, body: Optional[dict] = None):
 
     # 批量预加载所有 override 配置
     t0 = time.perf_counter()
-    all_overrides = strategy_config.list_overrides(data_dir)
+    all_overrides = strategy_config.list_overrides(data_dir, asset_type)
     logger.info("run_all: list_overrides took %.1fms (%d overrides)", (time.perf_counter() - t0) * 1000, len(all_overrides))
 
     params_map = {

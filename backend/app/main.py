@@ -238,7 +238,9 @@ async def _application_lifespan(app: FastAPI):
     ]
     strategy_engine = StrategyEngine(
         strategy_dirs=strategy_dirs,
-        override_loader=lambda sid: strategy_config.load_override(store.data_dir, sid),
+        override_loader=lambda sid, asset_type=None: strategy_config.load_override(
+            store.data_dir, sid, asset_type
+        ),
     )
     app.state.strategy_engine = strategy_engine
     logger.info("strategy engine loaded: %d strategies", len(strategy_engine.list_strategies()))

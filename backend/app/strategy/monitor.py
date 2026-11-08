@@ -631,7 +631,7 @@ class MonitorRuleEngine:
                     continue
                 overrides = {}
                 if self._data_dir:
-                    overrides = _strategy_config.load_override(self._data_dir, sid)
+                    overrides = _strategy_config.load_override(self._data_dir, sid, asset_type)
                 matrix_rules.append(rule)
                 overrides_map[sid] = overrides
                 params_map[sid] = dict(overrides.get("params") or {})
@@ -1133,7 +1133,7 @@ class MonitorRuleEngine:
         overrides = {}
         if self._data_dir:
             try:
-                overrides = _strategy_config.load_override(self._data_dir, sid)
+                overrides = _strategy_config.load_override(self._data_dir, sid, at)
             except Exception:
                 pass
 

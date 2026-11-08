@@ -29,6 +29,8 @@ Object.assign(FIELD_LABEL, {
 
 interface Props {
   strategyId: string | null
+  /** 当前编辑的资产类型; 股票/ETF 参数分开保存 */
+  assetType?: 'stock' | 'etf'
   onClose: () => void
   onSaved?: (displayLimit: number | null) => void
   onAiModify?: () => void
@@ -176,7 +178,7 @@ function ParamField({ def, value, onChange }: {
   )
 }
 
-export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModify, onDeleted }: Props) {
+export function StrategySettingsDialog({ strategyId, assetType = 'stock', onClose, onSaved, onAiModify, onDeleted }: Props) {
   const [detail, setDetail] = useState<StrategyDetail | null>(null)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -221,7 +223,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
   useEffect(() => {
     if (!strategyId) return
     setLoading(true)
-    api.strategyGet(strategyId)
+    api.strategyGet(strategyId, assetType)
       .then(d => {
         setDetail(d)
         setStrategyName(d.name ?? '')
@@ -260,7 +262,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
       })
       .catch(() => setDetail(null))
       .finally(() => setLoading(false))
-  }, [strategyId])
+  }, [strategyId, assetType])
 
   // 叠加策略: 权重归一(总和→1.0)
   const compositeTotal = compositeChildren.reduce((s, c) => s + (c.weight || 0), 0)
@@ -306,7 +308,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
         ...(detail?.source === 'composite'
           ? { children: compositeChildren.map(c => ({ strategy_id: c.id, weight: c.weight })) }
           : {}),
-      })
+      }, assetType)
       onSaved?.(displayLimit)
       onClose()
     } finally {
@@ -319,9 +321,9 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
     if (!strategyId) return
     setResetting(true)
     try {
-      await api.strategyResetConfig(strategyId)
-      // 重新加载默认值
-      const d = await api.strategyGet(strategyId)
+      await api.strategyResetConfig(strategyId, assetType)
+      // 重新加载当前资产类型的默认值
+      const d = await api.strategyGet(strategyId, assetType)
       setDetail(d)
       setStrategyName(d.name ?? '')
       setStrategyDesc(d.description ?? '')
@@ -391,6 +393,12 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
               <Settings2 className="h-4 w-4 text-accent" />
               <span id="strategy-settings-title" className="text-sm font-semibold text-foreground">{detail?.name ?? strategyId}</span>
               {detail && <span className="text-[10px] px-1.5 py-0.5 rounded bg-elevated text-muted">{{ builtin: '内置', custom: '自定义', ai: 'AI', composite: '叠加' }[detail.source] ?? detail.source}</span>}
+              <span
+                title="股票与 ETF 的参数配置分别保存，互不影响"
+                className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent border border-accent/20"
+              >
+                {assetType === 'etf' ? 'ETF 参数' : '股票参数'}
+              </span>
               <span className="text-[10px] text-muted/40 font-mono">{strategyId}</span>
             </div>
             <div className="flex items-center gap-2">

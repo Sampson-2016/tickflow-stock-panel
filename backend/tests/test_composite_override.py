@@ -86,7 +86,7 @@ def test_composite_child_uses_override_params_with_loader(tmp_path):
     overrides_store = {"thresh": {"params": {"min_close": 100}}}
     engine = StrategyEngine(
         strategy_dirs=[custom_dir, comp_dir],
-        override_loader=lambda sid: overrides_store.get(sid, {}),
+        override_loader=lambda sid, asset_type=None: overrides_store.get(sid, {}),
     )
     ctx = StrategyDataContext(
         asset_type="stock", timeframe="1d", as_of=date(2026, 1, 2),
@@ -108,7 +108,7 @@ def test_composite_child_override_loader_failure_is_safe(tmp_path):
     (custom_dir / "thresh.py").write_text(_param_filter_code("thresh"), encoding="utf-8")
     (comp_dir / "composite_blend.py").write_text(_composite_code("composite_blend", "thresh"), encoding="utf-8")
 
-    def bad_loader(sid: str) -> dict:
+    def bad_loader(sid: str, asset_type: str | None = None) -> dict:
         raise OSError("disk error")
 
     engine = StrategyEngine(

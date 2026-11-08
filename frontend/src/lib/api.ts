@@ -728,6 +728,8 @@ export interface StrategyExportBundle {
   description: string
   code: string
   config: Record<string, any>
+  /** 各资产类型的独立配置 (stock/etf); 旧版导出包没有该字段 */
+  asset_configs?: Record<string, Record<string, any>>
 }
 
 export interface StrategyBuildResult {
@@ -2928,8 +2930,8 @@ export const api = {
     )
   },
 
-  strategyGet: (id: string) =>
-    request<StrategyDetail>(`/api/strategies/${id}`),
+  strategyGet: (id: string, assetType: 'stock' | 'etf' = 'stock') =>
+    request<StrategyDetail>(`/api/strategies/${id}?asset_type=${assetType}`),
 
   strategyRun: (strategyId: string, params?: Record<string, any>, asOf?: string, pool?: string[]) =>
     request<ScreenerResult>('/api/strategies/run', {
@@ -2943,20 +2945,20 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ as_of: asOf ?? null }) },
     ),
 
-  strategySaveConfig: (strategyId: string, overrides: Record<string, any>) =>
+  strategySaveConfig: (strategyId: string, overrides: Record<string, any>, assetType: 'stock' | 'etf' = 'stock') =>
     request<{ ok: boolean }>('/api/strategies/config', {
       method: 'POST',
-      body: JSON.stringify({ strategy_id: strategyId, overrides }),
+      body: JSON.stringify({ strategy_id: strategyId, overrides, asset_type: assetType }),
     }),
 
-  strategyPatchConfig: (strategyId: string, overrides: Record<string, any>) =>
+  strategyPatchConfig: (strategyId: string, overrides: Record<string, any>, assetType: 'stock' | 'etf' = 'stock') =>
     request<{ ok: boolean }>('/api/strategies/config', {
       method: 'PATCH',
-      body: JSON.stringify({ strategy_id: strategyId, overrides }),
+      body: JSON.stringify({ strategy_id: strategyId, overrides, asset_type: assetType }),
     }),
 
-  strategyResetConfig: (strategyId: string) =>
-    request<{ ok: boolean }>(`/api/strategies/config/${strategyId}`, { method: 'DELETE' }),
+  strategyResetConfig: (strategyId: string, assetType: 'stock' | 'etf' = 'stock') =>
+    request<{ ok: boolean }>(`/api/strategies/config/${strategyId}?asset_type=${assetType}`, { method: 'DELETE' }),
 
   /** 删除自定义策略（内置策略不可删除） */
   strategyDelete: (strategyId: string) =>

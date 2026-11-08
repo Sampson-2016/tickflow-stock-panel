@@ -721,7 +721,7 @@ class StrategyBacktestService:
             loader = getattr(self.strategy_engine, "_override_loader", None)
             if loader is not None:
                 try:
-                    loaded = loader(child.strategy_id)
+                    loaded = loader(child.strategy_id, asset_type)
                     if isinstance(loaded, dict):
                         child_override = dict(loaded)
                 except Exception:  # noqa: BLE001

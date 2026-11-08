@@ -181,7 +181,9 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
         repo = KlineRepository(store)
         strategy_engine = StrategyEngine(
             strategy_dirs=_strategy_dirs(data_dir),
-            override_loader=lambda sid: strategy_config.load_override(data_dir, sid),
+            override_loader=lambda sid, asset_type=None: strategy_config.load_override(
+                data_dir, sid, asset_type
+            ),
         )
         service = StrategyBacktestService(BacktestEngine(repo), strategy_engine)
 

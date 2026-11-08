@@ -18,6 +18,8 @@ type LinkDraft = {
   strategyId: string
   direction: ScoringDirection
   weight: number
+  /** 候选方案对应的资产类型; 策略配置按股票/ETF 分开保存 */
+  assetType: 'stock' | 'etf'
 }
 
 function metricSummary(item: ResearchCandidate) {
@@ -73,7 +75,7 @@ export function ResearchCandidatesDialog({ onClose }: { onClose: () => void }) {
   })
   const applyFactor = useMutation({
     mutationFn: async ({ candidate, draft }: { candidate: ResearchCandidate; draft: LinkDraft }) => {
-      const detail = await api.strategyGet(draft.strategyId)
+      const detail = await api.strategyGet(draft.strategyId, draft.assetType)
       const factorName = candidate.source_id
       const targetWeight = Math.min(100, Math.max(1, draft.weight)) / 100
       const otherEntries = Object.entries(detail.scoring)
@@ -92,7 +94,7 @@ export function ResearchCandidatesDialog({ onClose }: { onClose: () => void }) {
           [factorName]: draft.direction,
         },
         scoring_replace: true,
-      })
+      }, draft.assetType)
       return { strategyId: draft.strategyId, strategyName: detail.name }
     },
     onSuccess: result => {
@@ -121,6 +123,7 @@ export function ResearchCandidatesDialog({ onClose }: { onClose: () => void }) {
       strategyId: options[0]?.id ?? '',
       direction: ic != null && ic < 0 ? 'low' : 'high',
       weight: 20,
+      assetType: item.config.asset_type === 'etf' ? 'etf' : 'stock',
     })
   }
 

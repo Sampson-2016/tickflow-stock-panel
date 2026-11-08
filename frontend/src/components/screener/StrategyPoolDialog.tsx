@@ -134,7 +134,7 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
       const lowerName = file.name.toLowerCase()
       let code: string
       let rawId: string
-      let config: Record<string, any> | null = null
+      const configs: Record<string, Record<string, any>> = {}
       let bundleSource: string | undefined
 
       if (lowerName.endsWith('.json')) {
@@ -145,7 +145,16 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
         }
         code = bundle.code
         rawId = String(bundle.strategy_id ?? '') || parseMetaId(code) || fileStem(file.name)
-        config = bundle.config && typeof bundle.config === 'object' ? bundle.config : null
+        // 新版导出包按资产类型分别保存 (stock/etf); 旧版只有一份 config, 归入 stock
+        if (bundle.asset_configs && typeof bundle.asset_configs === 'object') {
+          for (const [type, cfg] of Object.entries(bundle.asset_configs)) {
+            if (type !== 'stock' && type !== 'etf') continue
+            if (cfg && typeof cfg === 'object') configs[type] = cfg
+          }
+        }
+        if (bundle.config && typeof bundle.config === 'object' && !configs.stock) {
+          configs.stock = bundle.config
+        }
         bundleSource = bundle.source
       } else if (lowerName.endsWith('.py')) {
         code = await file.text()
@@ -166,13 +175,14 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
         target_source: target,
         mode: 'create',
       })
-      // 完整策略包: 恢复用户修改的基础参数/策略参数/评分/信号/止损/范围等
-      if (config && Object.keys(config).length > 0) {
-        await api.strategySaveConfig(strategyId, config)
+      // 完整策略包: 按资产类型分别恢复基础参数/策略参数/评分/信号/止损/范围等
+      const configKeys = Object.keys(configs).filter(type => Object.keys(configs[type]).length > 0)
+      for (const type of configKeys) {
+        await api.strategySaveConfig(strategyId, configs[type], type as 'stock' | 'etf')
       }
       await loadStrategies()
       setActiveTab(result.source === 'ai' ? 'ai' : 'custom')
-      setImportMsg(`已导入${config ? '完整配置' : ''}到${result.source === 'ai' ? 'AI' : '自定义'}策略: ${result.strategy_id}`)
+      setImportMsg(`已导入${configKeys.length > 0 ? '完整配置' : ''}到${result.source === 'ai' ? 'AI' : '自定义'}策略: ${result.strategy_id}`)
     } catch (e: any) {
       setImportError(String(e?.message ?? '导入失败'))
     } finally {

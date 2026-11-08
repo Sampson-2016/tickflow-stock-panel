@@ -980,8 +980,8 @@ export function StrategyBacktest() {
   }, [strategies.isLoading, strategyList, selectedStrategy])
 
   const strategyDetail = useQuery({
-    queryKey: QK.strategyDetail(selectedStrategy ?? ''),
-    queryFn: () => api.strategyGet(selectedStrategy!),
+    queryKey: [...QK.strategyDetail(selectedStrategy ?? ''), assetType],
+    queryFn: () => api.strategyGet(selectedStrategy!, assetType),
     enabled: !!selectedStrategy,
   })
 
@@ -1021,7 +1021,7 @@ export function StrategyBacktest() {
     try {
       // 合并 params 进 overrides(后端 _strategy_detail 会把 params 合并进 params_defaults)
       const payload = { ...normalizeStrategyOverrides(detail, overrides), params: strategyParams }
-      await api.strategySaveConfig(selectedStrategy, payload)
+      await api.strategySaveConfig(selectedStrategy, payload, assetType)
       toast('已应用到策略定义', 'success')
       await strategyDetail.refetch()
       setSettingsOpen(false)

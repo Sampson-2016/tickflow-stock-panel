@@ -981,6 +981,7 @@ export function Screener() {
 
       <StrategySettingsDialog
         strategyId={settingsStrategyId}
+        assetType={assetType}
         onClose={() => setSettingsStrategyId(null)}
         onSaved={(limit) => {
           if (settingsStrategyId) {
@@ -993,7 +994,7 @@ export function Screener() {
           try {
             const [src, detail] = await Promise.all([
               api.strategyGetSource(settingsStrategyId),
-              api.strategyGet(settingsStrategyId),
+              api.strategyGet(settingsStrategyId, assetType),
             ])
             storage.strategyModify.set({
               name: detail.name ?? '',
